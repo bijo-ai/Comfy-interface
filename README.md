@@ -27,7 +27,8 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `start_studio.bat` | One-click launcher: starts ComfyUI if needed, then the web app |
 | `run_web.bat` | Starts only the web app |
 | `assets/studio.ico` | App icon for a Desktop shortcut |
-| `tests/` | pytest suite for the client, gallery, jobs and web API |
+| `web/bot_core.py`, `web/bot.py` | Telegram bot: behaviour (commands, access lock, Vary) and python-telegram-bot wiring |
+| `tests/` | pytest suite for the client, gallery, jobs, web API and bot |
 
 ## Web app: ComfyUI Studio
 
@@ -66,6 +67,34 @@ The web app doesn't write copies to `outputs/`; that folder is only used by the 
 
 **Tests:** `uv run pytest`
 
+## Telegram bot
+
+Generate images from your phone, from anywhere. The bot runs inside ComfyUI Studio, so `start_studio.bat`
+starts it too. It only makes outgoing connections to Telegram, so nothing on your PC is exposed to the
+internet. Images land in ComfyUI's output folder and show up in the Studio gallery.
+
+**Setup (once):**
+1. In Telegram, message **@BotFather**, send `/newbot`, and pick a name and a username ending in `bot`.
+2. Put the token it gives you in `.env` as `TELEGRAM_BOT_TOKEN=...`. Keep it secret: anyone with it controls the bot.
+3. Start Studio and send your bot any message. It replies with your numeric user ID.
+4. Add `TELEGRAM_ALLOWED_USER_ID=<that number>` to `.env` and restart Studio. From then on the bot answers
+   only you, and messages from anyone else are ignored.
+
+**Use:**
+
+| Send | Get |
+|---|---|
+| `a beach at sunset` | square 512×512 |
+| `/portrait an old fisherman` | portrait 512×768 |
+| `/landscape mountains at dawn` | landscape 768×512 |
+| tap **🔁 Vary** under an image | same prompt and size, new seed |
+| `/help` | these instructions |
+
+The bot shows live progress ("🎨 Generating… step 12/20") and captions each image with its seed. It and the
+website share one generator: if one is busy, the other says so and asks you to try again in a moment. The PC
+must be on, online, and running Studio. If it starts offline, the bot keeps retrying every 30 seconds.
+The Studio window shows `Telegram bot: on/off` at startup.
+
 ## Setup (Windows)
 
 Requires [uv](https://docs.astral.sh/uv/) and ComfyUI running at `http://127.0.0.1:8188`
@@ -91,6 +120,8 @@ uv run python test_generate.py
 | `TIMEOUT` | `180` | Seconds to wait for a generation before giving up |
 | `COMFYUI_OUTPUT_DIR` | *(auto-detected)* | ComfyUI's output folder, shown in the web gallery |
 | `CACHE_DIR` | `cache` | Where the web app keeps gallery thumbnails |
+| `TELEGRAM_BOT_TOKEN` | *(empty: bot off)* | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_USER_ID` | *(empty)* | The only Telegram user the bot serves |
 
 Real environment variables take precedence over `.env`.
 
