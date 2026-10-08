@@ -14,7 +14,7 @@ import struct
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -244,6 +244,12 @@ class ComfyClient:
             return list(spec[1].get("options", []))
         return list(spec[0])
 
+    async def upload_image(self, path: Path, name: str) -> str:
+        files = {"image": (name, path.read_bytes(), "image/png")}
+        response = await self._request("POST", "/upload/image", files=files, data={"overwrite": "true", "type": "input"})
+        response.raise_for_status()
+        return response.json()["name"]
+
     async def get_history(self, prompt_id: str) -> dict[str, Any] | None:
         response = await self._request("GET", f"/history/{prompt_id}")
         response.raise_for_status()
@@ -425,8 +431,70 @@ async def generate(
     params.validate()
     params = params.with_seed()
     workflow, roles = apply_params(load_workflow(settings.workflow_path), params)
-    started = time.monotonic()
+    return await _run(workflow, roles.save, params, settings, on_progress, on_preview, save_copy)
 
+
+async def upscale(
+    source: Path,
+    params: GenerationParams,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+    on_preview: PreviewCallback | None = None,
+) -> GenerationResult:
+    """Upscale an existing PNG ×2 with a light img2img pass (tiled VAE keeps VRAM low).
+
+    `params` carries the prompt, negative prompt, seed, cfg and checkpoint (`model`) to refine with.
+    """
+    if not params.model:
+        raise InvalidParamsError("Upscaling needs a model.")
+    params = params.with_seed()
+    async with httpx.AsyncClient(timeout=30) as http:
+        image_name = await ComfyClient(settings.comfyui_url, http).upload_image(source, UPSCALE_INPUT_NAME)
+    workflow = build_upscale_workflow(params.model, image_name, params, params.cfg)
+    result = await _run(workflow, UPSCALE_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
+    result.params = replace(params, width=params.width * 2, height=params.height * 2, steps=UPSCALE_STEPS)
+    return result
+
+
+UPSCALE_INPUT_NAME = "studio_upscale_src.png"
+UPSCALE_SAVE_NODE = "9"
+UPSCALE_STEPS = 15
+UPSCALE_DENOISE = 0.4  # enough to add detail without changing the picture
+TILED = {"tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}
+
+
+def build_upscale_workflow(ckpt: str, image_name: str, params: GenerationParams, cfg: float) -> Workflow:
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "3": {"class_type": "ImageScaleBy", "inputs": {"image": ["2", 0], "upscale_method": "lanczos", "scale_by": 2.0}},
+        "4": {"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["3", 0], "vae": ["1", 2], **TILED}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": params.prompt, "clip": ["1", 1]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": params.negative_prompt, "clip": ["1", 1]}},
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0], "seed": params.seed, "steps": UPSCALE_STEPS, "cfg": cfg,
+                "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": UPSCALE_DENOISE,
+                "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["4", 0],
+            },
+        },
+        "8": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["7", 0], "vae": ["1", 2], **TILED}},
+        UPSCALE_SAVE_NODE: {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI_upscaled"}},
+    }
+
+
+async def _run(
+    workflow: Workflow,
+    save_node: str,
+    params: GenerationParams,
+    settings: Settings,
+    on_progress: ProgressCallback | None,
+    on_preview: PreviewCallback | None,
+    save_copy: bool,
+) -> GenerationResult:
+    """Queue a workflow, wait for it, and fetch its first output image."""
+    started = time.monotonic()
     async with httpx.AsyncClient(timeout=30) as http:
         client = ComfyClient(settings.comfyui_url, http)
         ws = await _open_ws(client.ws_url)  # connect before queueing so no events are missed
@@ -436,7 +504,7 @@ async def generate(
         finally:
             if ws is not None:
                 await ws.close()
-        image_refs = _output_images(entry, roles.save)
+        image_refs = _output_images(entry, save_node)
         image_ref = image_refs[0]
         image = await client.fetch_image(image_ref)
 

@@ -144,3 +144,41 @@ def test_list_checkpoints_handles_both_combo_formats() -> None:
             return await client.list_checkpoints(), await client.list_checkpoints()
 
     assert asyncio.run(scenario()) == (["a.safetensors", "b.safetensors"], ["c.safetensors"])
+
+
+from comfy_client import UPSCALE_INPUT_NAME, build_upscale_workflow
+
+
+def test_upscale_workflow_shape() -> None:
+    params = GenerationParams(prompt="a fox", negative_prompt="blurry", seed=5)
+    graph = build_upscale_workflow("DreamShaper_8_pruned.safetensors", UPSCALE_INPUT_NAME, params, cfg=7.0)
+    by_class = {node["class_type"]: node["inputs"] for node in graph.values()}
+    assert by_class["CheckpointLoaderSimple"]["ckpt_name"] == "DreamShaper_8_pruned.safetensors"
+    assert by_class["LoadImage"]["image"] == UPSCALE_INPUT_NAME
+    assert by_class["ImageScaleBy"]["scale_by"] == 2.0
+    assert "VAEEncodeTiled" in by_class and "VAEDecodeTiled" in by_class  # tiled = low VRAM
+    sampler = by_class["KSampler"]
+    assert (sampler["seed"], sampler["denoise"], sampler["cfg"]) == (5, 0.4, 7.0)
+    texts = {graph[sampler[key][0]]["inputs"]["text"] for key in ("positive", "negative")}
+    assert texts == {"a fox", "blurry"}
+    assert by_class["SaveImage"]["filename_prefix"] == "ComfyUI_upscaled"
+
+
+def test_upload_image_multipart(tmp_path) -> None:
+    source = tmp_path / "src.png"
+    source.write_bytes(b"\x89PNG fake")
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["type"] = request.headers["content-type"]
+        seen["body"] = request.content
+        return httpx.Response(200, json={"name": UPSCALE_INPUT_NAME, "subfolder": "", "type": "input"})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await ComfyClient("http://comfy", http).upload_image(source, UPSCALE_INPUT_NAME)
+
+    assert asyncio.run(scenario()) == UPSCALE_INPUT_NAME
+    assert seen["path"] == "/upload/image" and seen["type"].startswith("multipart/form-data")
+    assert b'name="overwrite"' in seen["body"] and b"PNG fake" in seen["body"]
