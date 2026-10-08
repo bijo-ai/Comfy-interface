@@ -341,7 +341,7 @@ class StudioBot:
             log.info("Telegram setup: add TELEGRAM_ALLOWED_USER_ID=%s to .env to allow this user", user_id)
             await chat.send_text(
                 f"👋 Your Telegram user ID is {user_id}.\n"
-                f"Add TELEGRAM_ALLOWED_USER_ID={user_id} to .env and restart ComfyUI Studio."
+                f"Add TELEGRAM_ALLOWED_USER_ID={user_id} to .env and restart LUMOS Studios."
             )
             return False
         if user_id == self.owner_id or self.users.is_allowed(user_id):

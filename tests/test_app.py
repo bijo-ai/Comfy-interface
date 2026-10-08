@@ -37,7 +37,7 @@ def sse_events(client: TestClient, job_id: str) -> list[dict]:
 
 def test_index_served(client) -> None:
     response = client.get("/")
-    assert response.status_code == 200 and "ComfyUI Studio" in response.text
+    assert response.status_code == 200 and "LUMOS Studios" in response.text
 
 
 def test_status_reports_offline_comfyui(client, settings) -> None:

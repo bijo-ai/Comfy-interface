@@ -18,6 +18,7 @@ const els = {
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
   createView: $("#create-view"), galleryView: $("#gallery-view"), tabs: [...document.querySelectorAll(".tab")],
   tabCount: $("#tab-count"), search: $("#gallery-search"), filters: [...document.querySelectorAll("#gallery-filters .chip")],
+  tabIndicator: $(".tab-indicator"), stage: $(".stage"), stageGlow: $(".stage-glow"),
 };
 const lb = {
   dialog: $("#lightbox"), img: $("#lb-img"), prompt: $("#lb-prompt"), negative: $("#lb-negative"), meta: $("#lb-meta"),
@@ -576,6 +577,20 @@ function showGrid(images, caption) {
   els.stageEmpty.hidden = true;
   els.stageGrid.hidden = false;
   els.stageCaption.textContent = `${images.length} variations · ${caption}`;
+  setStageGlow(images[0]);
+}
+
+function setStageGlow(image) {
+  // an ambient halo made from the image's own colors (the small thumbnail is plenty once blurred)
+  els.stageGlow.classList.remove("on");
+  if (!image) return;
+  const url = imageUrl(image.name, "thumbs");
+  const probe = new Image();
+  probe.onload = () => {
+    els.stageGlow.style.setProperty("--glow", `url("${url}")`);
+    els.stageGlow.classList.add("on");
+  };
+  probe.src = url;
 }
 
 function showOnStage(image, caption, animation = "reveal") {
@@ -590,10 +605,12 @@ function showOnStage(image, caption, animation = "reveal") {
   els.stageImg.classList.remove("reveal", "from-live");
   void els.stageImg.offsetWidth; // restart the animation
   els.stageImg.classList.add(animation);
+  setStageGlow(image);
 }
 
 function clearStage() {
   els.stageGrid.hidden = true;
+  setStageGlow(null);
   state.stageName = null;
   state.stageImages = [];
   els.stageImg.hidden = true;
@@ -607,6 +624,7 @@ function tile(image) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "tile";
+  button.style.setProperty("--i", String(state.images.indexOf(image) % 24)); // staggered entry
   button.setAttribute("aria-label", image.params?.prompt ?? image.name);
   const img = document.createElement("img");
   img.loading = "lazy";
@@ -696,8 +714,19 @@ function showTab(name) {
     else tab.removeAttribute("aria-current");
   }
   if (location.hash !== `#${state.tab}`) history.replaceState(null, "", `#${state.tab}`);
+  moveTabIndicator();
   if (state.tab === "gallery" && (state.galleryStale || !state.images.length)) loadGallery(true);
 }
+
+function moveTabIndicator() {
+  const active = els.tabs.find((tab) => tab.dataset.tab === state.tab);
+  if (!active) return;
+  els.tabIndicator.style.width = `${active.offsetWidth}px`;
+  els.tabIndicator.style.transform = `translateX(${active.offsetLeft}px)`;
+}
+
+window.addEventListener("resize", moveTabIndicator);
+document.fonts?.ready.then(moveTabIndicator); // the web font changes tab widths
 
 // --- lightbox --------------------------------------------------------------
 

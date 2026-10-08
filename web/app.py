@@ -185,7 +185,7 @@ def create_app(
         if bot_runner is not None:
             await bot_runner.stop()
 
-    app = FastAPI(title="ComfyUI Studio", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="LUMOS Studios", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

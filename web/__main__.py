@@ -1,4 +1,4 @@
-"""Start ComfyUI Studio:  python -m web [--port 7860] [--no-browser]"""
+"""Start LUMOS Studios:  python -m web [--port 7860] [--no-browser]"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from web.app import create_app
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ComfyUI Studio web app")
+    parser = argparse.ArgumentParser(description="LUMOS Studios web app")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--no-browser", action="store_true", help="don't open the browser")
     args = parser.parse_args()
@@ -28,7 +28,7 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.port}"
     if not args.no_browser:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    print(f"ComfyUI Studio running at {url}  (press Ctrl+C to stop)")
+    print(f"LUMOS Studios running at {url}  (press Ctrl+C to stop)")
     print(f"Telegram bot: {telegram_status(settings.telegram_bot_token, settings.telegram_allowed_user_id)}")
     uvicorn.run(create_app(settings), host="127.0.0.1", port=args.port, log_level="warning")
 

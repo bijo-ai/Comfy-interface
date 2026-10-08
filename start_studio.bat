@@ -1,5 +1,5 @@
 @echo off
-title ComfyUI Studio
+title LUMOS Studios
 cd /d "%~dp0"
 set "CURL=%SystemRoot%\System32\curl.exe"
 
@@ -26,6 +26,6 @@ if errorlevel 1 (
 )
 
 :ready
-echo Keep this window open while you use ComfyUI Studio. Close it to stop the site.
+echo Keep this window open while you use LUMOS Studios. Close it to stop the site.
 ".venv\Scripts\python.exe" -m web
 pause

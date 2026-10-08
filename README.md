@@ -1,4 +1,8 @@
-# comfyui-mcp
+# LUMOS Studios
+
+Your own image studio on top of a local ComfyUI: a web app (LUMOS Studios), a Telegram bot, and an MCP server for LLMs.
+
+## MCP server (comfyui-mcp)
 
 A local MCP server that lets an LLM in **LM Studio** generate images with your local **ComfyUI**.
 It exposes one tool:
@@ -23,7 +27,7 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `workflow_api.json` | The ComfyUI graph, in **API format** |
 | `test_generate.py` | End-to-end test of the generation logic (no MCP) |
 | `check_mcp.py` | Minimal MCP client: lists tools and optionally calls `generate_image` |
-| `web/` | **ComfyUI Studio** web app: `app.py` (FastAPI routes), `jobs.py` (live progress), `gallery.py` (output folder), `static/` (the page) |
+| `web/` | **LUMOS Studios** web app: `app.py` (FastAPI routes), `jobs.py` (live progress), `gallery.py` (output folder), `static/` (the page) |
 | `start_studio.bat` | One-click launcher: starts ComfyUI if needed, then the web app |
 | `run_web.bat` | Starts only the web app |
 | `assets/studio.ico` | App icon for a Desktop shortcut |
@@ -32,7 +36,7 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `web/bot_core.py`, `web/bot.py` | Telegram bot: behaviour (commands, models, styles, ×4, upscale, access lock) and python-telegram-bot wiring |
 | `tests/` | pytest suite for the client, gallery, jobs, web API and bot |
 
-## Web app: ComfyUI Studio
+## Web app: LUMOS Studios
 
 A local website for generating and browsing images without an LLM. Type a prompt and press **Generate**
 (or Ctrl+Enter). A live progress bar shows each sampling step, then the image appears.
@@ -109,7 +113,7 @@ The web app doesn't write copies to `outputs/`; that folder is only used by the 
 
 ## Telegram bot
 
-Generate images from your phone, from anywhere. The bot runs inside ComfyUI Studio, so `start_studio.bat`
+Generate images from your phone, from anywhere. The bot runs inside LUMOS Studios, so `start_studio.bat`
 starts it too. It only makes outgoing connections to Telegram, so nothing on your PC is exposed to the
 internet. Images land in ComfyUI's output folder and show up in the Studio gallery.
 
