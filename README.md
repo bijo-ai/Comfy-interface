@@ -92,8 +92,19 @@ internet. Images land in ComfyUI's output folder and show up in the Studio galle
 1. In Telegram, message **@BotFather**, send `/newbot`, and pick a name and a username ending in `bot`.
 2. Put the token it gives you in `.env` as `TELEGRAM_BOT_TOKEN=...`. Keep it secret: anyone with it controls the bot.
 3. Start Studio and send your bot any message. It replies with your numeric user ID.
-4. Add `TELEGRAM_ALLOWED_USER_ID=<that number>` to `.env` and restart Studio. From then on the bot answers
-   only you, and messages from anyone else are ignored.
+4. Add `TELEGRAM_ALLOWED_USER_ID=<that number>` to `.env` and restart Studio. You're now the bot's **owner**.
+
+**Sharing with friends:**
+1. A friend opens your bot (`t.me/<your bot>`) and sends any message. They get "request sent to the owner".
+2. You get their name with **✅ Allow** / **🚫 Deny** buttons.
+3. Approved friends get a welcome message and can use everything: shapes, `/model`, `/style`, Vary, ×4 and Upscale. Each person keeps their own model and style.
+4. **`/users`** (owner only) lists everyone you've let in, each with a **Remove** button.
+
+How it behaves:
+- **Your GPU:** everyone shares it, one image at a time. Anyone sending while it's busy is told to try again in a moment.
+- **Your gallery:** friends' images are saved on your PC and appear in your Studio gallery. Friends are told this when they join.
+- **Approvals:** saved in `data/telegram_users.json` (git-ignored), so they survive restarts. Denied people are ignored after the first "no".
+- **Private chats only:** the bot ignores group chats. Buttons only work for the person they were sent to.
 
 **Use:**
 

@@ -61,30 +61,42 @@ class TelegramChat:
         await self._bot.send_document(self._chat_id, InputFile(path.read_bytes(), filename=path.name), caption=caption)
 
 
+def _private(chat: Any) -> bool:
+    """Only one-to-one chats: in groups, everyone there would see (and could tap) the owner's images."""
+    return chat is not None and getattr(chat, "type", None) == "private"
+
+
+def _who(user: Any) -> str:
+    name = getattr(user, "full_name", "") or f"user {user.id}"
+    username = getattr(user, "username", None)
+    return f"{name} (@{username})" if username else name
+
+
 def _keyboard(buttons: Buttons) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in buttons])
 
 
 def build_application(token: str, studio: StudioBot) -> Application:
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message, user = update.effective_message, update.effective_user
-        if message is None or user is None or not message.text:
+        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+        if message is None or user is None or not message.text or not _private(chat):
             return
-        await studio.handle_text(user.id, message.text, TelegramChat(context.bot, message.chat_id))
+        await studio.handle_text(user.id, message.text, TelegramChat(context.bot, message.chat_id), who=_who(user))
 
     async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query, chat = update.callback_query, update.effective_chat
-        if query is None or not query.data or chat is None:
+        if query is None or not query.data or not _private(chat):
             return
         await query.answer()
         # effective_chat, not query.message.chat_id: old buttons arrive with an InaccessibleMessage
-        await studio.handle_button(query.from_user.id, query.data, TelegramChat(context.bot, chat.id))
+        await studio.handle_button(query.from_user.id, query.data, TelegramChat(context.bot, chat.id), who=_who(query.from_user))
 
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("Telegram handler failed", exc_info=context.error)
 
     # Concurrent updates: a long generation must not hold up Busy replies or Vary button answers.
     application = Application.builder().token(token).concurrent_updates(True).build()
+    studio.chat_for = lambda user_id: TelegramChat(application.bot, user_id)  # private chat id == user id
     application.add_handler(MessageHandler(filters.TEXT, on_text))
     application.add_handler(CallbackQueryHandler(on_button))
     application.add_error_handler(on_error)

@@ -10,7 +10,8 @@ from config import _int_or_none
 from models import available_profiles
 from tests.conftest import graph_for
 from web import bot_core
-from web.bot_core import BUSY, EXPIRED, HELP, StudioBot, caption_for, parse_request
+from web.bot_core import BUSY, EXPIRED, HELP, PENDING, REQUEST_SENT, WELCOME, StudioBot, caption_for, parse_request
+from web.users import UserStore
 from web.gallery import Gallery
 from web.jobs import JobManager, UpscaleRequest
 
@@ -75,9 +76,15 @@ def button_data(buttons) -> list[str]:
     return [data for row in buttons for _, data in row]
 
 
-def make_bot(tmp_path: Path, runner, allowed: int | None = USER, ckpts=(DREAM, SD15, SDXL)) -> StudioBot:
+def make_bot(tmp_path: Path, runner, allowed: int | None = USER, ckpts=(DREAM, SD15, SDXL), jobs=None) -> StudioBot:
     gallery = Gallery(tmp_path, tmp_path / "cache")
-    return StudioBot(JobManager(runner), FakeGalleries(gallery), allowed, FakeCatalog(ckpts))
+    chats: dict[int, FakeChat] = {}
+    bot = StudioBot(
+        jobs or JobManager(runner), FakeGalleries(gallery), allowed, FakeCatalog(ckpts),
+        users=UserStore(tmp_path / "users.json"), chat_for=lambda uid: chats.setdefault(uid, FakeChat()),
+    )
+    bot.test_chats = chats
+    return bot
 
 
 def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
@@ -135,20 +142,6 @@ def test_unset_allowed_user_replies_with_id(tmp_path, caplog) -> None:
         asyncio.run(make_bot(tmp_path, done_runner(seen), allowed=None).handle_text(777, "a cat", chat))
     assert seen == [] and "TELEGRAM_ALLOWED_USER_ID=777" in chat.texts()[0]
     assert "TELEGRAM_ALLOWED_USER_ID=777" in caplog.text
-
-
-def test_other_user_ignored_for_text_and_buttons(tmp_path) -> None:
-    seen: list = []
-    chat = FakeChat()
-    bot = make_bot(tmp_path, done_runner(seen))
-
-    async def scenario():
-        await bot.handle_text(999, "a cat", chat)
-        await bot.handle_button(999, "model:sdxl", chat)
-        await bot.handle_button(999, "vary:abc", chat)
-
-    asyncio.run(scenario())
-    assert seen == [] and chat.calls == [] and bot.model_key is None
 
 
 def test_help_commands(tmp_path) -> None:
@@ -210,7 +203,7 @@ def test_choosing_missing_model_is_refused(tmp_path) -> None:
     chat = FakeChat()
     bot = make_bot(tmp_path, done_runner([]), ckpts=(DREAM,))
     asyncio.run(bot.handle_button(USER, "model:sdxl", chat))
-    assert bot.model_key is None and "isn't installed" in chat.texts()[0]
+    assert bot.prefs_for(USER).model_key is None and "isn't installed" in chat.texts()[0]
 
 
 def test_vary_reuses_prompt_with_new_seed(tmp_path, make_png) -> None:
@@ -273,8 +266,8 @@ def test_sdxl_refuses_x4_and_upscale(tmp_path, make_png) -> None:
     make_png(tmp_path / "xl.png", graph, size=(512, 512))
 
     async def scenario():
-        x4_token = bot.actions.put(params, None)
-        up_token = bot.actions.put(params, "xl.png")
+        x4_token = bot.actions.put(params, None, USER)
+        up_token = bot.actions.put(params, "xl.png", USER)
         await bot.handle_button(USER, f"x4:{x4_token}", chat)
         await bot.handle_button(USER, f"up:{up_token}", chat)
 
@@ -304,7 +297,7 @@ def test_busy_reply(tmp_path) -> None:
     async def scenario():
         jobs = JobManager(slow_runner)
         jobs.start(GenerationParams(prompt="from the website"))
-        bot = StudioBot(jobs, FakeGalleries(Gallery(tmp_path, tmp_path / "c")), USER, FakeCatalog())
+        bot = make_bot(tmp_path, slow_runner, jobs=jobs)
         chat = FakeChat()
         await bot.handle_text(USER, "a cat", chat)
         return chat
@@ -335,7 +328,7 @@ def test_deleted_model_falls_back_to_default(tmp_path, make_png) -> None:
     seen: list = []
     chat = FakeChat()
     bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path), ckpts=(DREAM, SD15))  # SDXL file deleted
-    bot.model_key = "sdxl"
+    bot.prefs_for(USER).model_key = "sdxl"
 
     async def scenario():
         await bot.handle_text(USER, "/model", chat)
@@ -344,5 +337,108 @@ def test_deleted_model_falls_back_to_default(tmp_path, make_png) -> None:
     asyncio.run(scenario())
     menu = chat.calls[0][3]
     assert button_data(menu) == ["model:dreamshaper", "model:sd15"]  # menu still works
-    assert bot.model_key is None and "switched to" in chat.texts()[1]
+    assert bot.prefs_for(USER).model_key is None and "switched to" in chat.texts()[1]
     assert seen[0].model == DREAM  # the prompt still ran, on the default model
+
+
+# --- friends: owner approves who may use the bot ---------------------------------------------
+
+FRIEND = 999
+
+
+def test_stranger_request_goes_to_owner_once(tmp_path) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen))
+    stranger = FakeChat()
+
+    async def scenario():
+        await bot.handle_text(FRIEND, "a cat", stranger, who="Ann (@ann)")
+        await bot.handle_text(FRIEND, "a dog", stranger, who="Ann (@ann)")
+
+    asyncio.run(scenario())
+    assert seen == [] and stranger.texts() == [REQUEST_SENT, PENDING]
+    owner = bot.test_chats[USER]
+    assert len(owner.calls) == 1  # pinged once, not on every message
+    _, text, _, buttons = owner.calls[0]
+    assert "Ann (@ann)" in text and button_data(buttons) == [f"allow:{FRIEND}", f"deny:{FRIEND}"]
+
+
+def test_owner_approves_friend_with_own_settings(tmp_path, make_png) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path))
+    friend, owner = FakeChat(), FakeChat()
+
+    async def scenario():
+        await bot.handle_text(FRIEND, "hi", friend, who="Ann")
+        await bot.handle_button(USER, f"allow:{FRIEND}", owner)
+        await bot.handle_button(FRIEND, "model:sdxl", friend)
+        await bot.handle_text(FRIEND, "a castle", friend, who="Ann")
+
+    asyncio.run(scenario())
+    assert "Ann can use the bot" in owner.texts()[0]
+    welcome = bot.test_chats[FRIEND].texts()
+    assert welcome and welcome[0] == WELCOME and "saved on" in WELCOME
+    assert seen[0].model == SDXL and seen[0].prompt == "a castle"
+    assert bot.prefs_for(USER).model_key is None  # the owner's choice is untouched
+    assert UserStore(tmp_path / "users.json").is_allowed(FRIEND)  # survives a restart
+
+
+def test_denied_user_is_ignored_afterwards(tmp_path) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen))
+    friend, owner = FakeChat(), FakeChat()
+
+    async def scenario():
+        await bot.handle_text(FRIEND, "hi", friend, who="Bob")
+        await bot.handle_button(USER, f"deny:{FRIEND}", owner)
+        await bot.handle_text(FRIEND, "please", friend, who="Bob")
+
+    asyncio.run(scenario())
+    assert seen == [] and friend.texts() == [REQUEST_SENT]  # nothing after the denial
+    assert len(bot.test_chats[FRIEND].calls) == 1  # told once that the owner said no
+    assert len(bot.test_chats[USER].calls) == 1  # no new request ping
+
+
+def test_only_owner_can_approve(tmp_path) -> None:
+    bot = make_bot(tmp_path, done_runner([]))
+    friend = FakeChat()
+
+    async def scenario():
+        bot.users.allow(FRIEND, "Ann")
+        await bot.handle_button(FRIEND, "allow:555", friend)
+        await bot.handle_text(FRIEND, "/users", friend)
+
+    asyncio.run(scenario())
+    assert not bot.users.is_allowed(555)
+    assert "/users" not in friend.texts()[0]  # friends just get the normal help
+
+
+def test_users_command_lists_and_removes(tmp_path) -> None:
+    bot = make_bot(tmp_path, done_runner([]))
+    owner, friend = FakeChat(), FakeChat()
+
+    async def scenario():
+        bot.users.allow(FRIEND, "Ann")
+        await bot.handle_text(USER, "/users", owner)
+        remove = button_data(owner.calls[0][3])[0]
+        await bot.handle_button(USER, remove, owner)
+        await bot.handle_text(FRIEND, "a cat", friend, who="Ann")
+
+    asyncio.run(scenario())
+    assert "Ann" in owner.calls[0][1] and button_data(owner.calls[0][3]) == [f"remove:{FRIEND}"]
+    assert not bot.users.is_allowed(FRIEND) and friend.texts() == [REQUEST_SENT]
+
+
+def test_buttons_are_personal(tmp_path, make_png) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path))
+    owner, friend = FakeChat(), FakeChat()
+
+    async def scenario():
+        bot.users.allow(FRIEND, "Ann")
+        await bot.handle_text(USER, "a cat", owner)
+        owners_vary = button_data(owner.last("send_photo")[3])[0]
+        await bot.handle_button(FRIEND, owners_vary, friend)
+
+    asyncio.run(scenario())
+    assert len(seen) == 1 and friend.texts() == [EXPIRED]

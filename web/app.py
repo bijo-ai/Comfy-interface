@@ -36,6 +36,7 @@ from web.builders import build_generation, build_upscale, resolve_profile
 from web.catalog import ModelCatalog
 from web.gallery import Gallery
 from web.jobs import BusyError, JobManager, JobRequest, Runner, UpscaleRequest
+from web.users import UserStore
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +144,9 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         bot_runner = None
         if settings.telegram_bot_token:
-            studio = StudioBot(jobs, galleries, settings.telegram_allowed_user_id, catalog)
+            studio = StudioBot(
+                jobs, galleries, settings.telegram_allowed_user_id, catalog, UserStore(settings.telegram_users_path)
+            )
             bot_runner = BotRunner(
                 lambda: build_application(settings.telegram_bot_token, studio), on_started=register_commands
             )

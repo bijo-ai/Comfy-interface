@@ -20,7 +20,8 @@ class Settings:
     comfyui_output_dir: Path | None
     cache_dir: Path
     telegram_bot_token: str | None = None
-    telegram_allowed_user_id: int | None = None
+    telegram_allowed_user_id: int | None = None  # the bot's owner; approves everyone else
+    telegram_users_path: Path = PROJECT_DIR / "data" / "telegram_users.json"
 
 
 def _resolve(path_str: str) -> Path:

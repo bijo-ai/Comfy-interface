@@ -1,4 +1,7 @@
-"""Telegram bot behaviour without the Telegram library: access control, commands, models, styles, ×4 and upscale."""
+"""Telegram bot behaviour without the Telegram library: access control, commands, models, styles, ×4 and upscale.
+
+The owner (TELEGRAM_ALLOWED_USER_ID) approves anyone else who wants to use the bot.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import logging
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,6 +19,7 @@ from models import SD15_SHAPES, ModelProfile, check_limits, default_profile, pro
 from styles import STYLES, style_by_key
 from web.builders import FALLBACK_LIMITS, UPSCALE_MAX_SIDE, build_generation, build_upscale, resolve_profile
 from web.jobs import BusyError, JobManager, JobRequest, UpscaleRequest
+from web.users import UserStore
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +38,17 @@ HELP = (
     "• /style → choose a style\n\n"
     "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2."
 )
+OWNER_HELP = "\n• /users → see and remove the people you've let in"
 BUSY = "⏳ Busy with another image. Try again in a moment."
 EXPIRED = "This button expired. Send the prompt again."
 NOT_FOUND = "⚠️ The image was generated but couldn't be found in ComfyUI's output folder."
+REQUEST_SENT = "📨 This is a private bot. I've asked its owner to let you in; you'll get a message here when they decide."
+PENDING = "⏳ Still waiting for the owner to approve you."
+WELCOME = (
+    "✅ You're in! The owner approved you.\n\n"
+    "Images are made on the owner's PC and saved on it too.\n\n" + HELP.replace(" on your PC", "")
+)
+DENIED_NOTICE = "Sorry, the owner didn't approve access to this bot."
 
 
 class Chat(Protocol):
@@ -79,10 +92,17 @@ def caption_for(params: GenerationParams, seed: int, elapsed: float, model_label
     return f"{prompt}\n\nseed {seed} · {params.width}×{params.height} · {model_label} · {elapsed}s"
 
 
+@dataclass
+class Prefs:
+    model_key: str | None = None  # None = Studio's default model
+    style_key: str = "none"
+
+
 @dataclass(frozen=True)
 class Action:
     params: GenerationParams  # settings to reuse (seed is replaced on use)
     image_name: str | None  # gallery image for 🔍 Upscale
+    user_id: int  # buttons only work for the person they were sent to
 
 
 class ActionStore:
@@ -92,123 +112,196 @@ class ActionStore:
         self._items: OrderedDict[str, Action] = OrderedDict()
         self._keep = keep
 
-    def put(self, params: GenerationParams, image_name: str | None) -> str:
+    def put(self, params: GenerationParams, image_name: str | None, user_id: int) -> str:
         token = uuid.uuid4().hex[:16]
-        self._items[token] = Action(params, image_name)
+        self._items[token] = Action(params, image_name, user_id)
         while len(self._items) > self._keep:
             self._items.popitem(last=False)
         return token
 
-    def get(self, token: str) -> Action | None:
-        return self._items.get(token)
+    def get(self, token: str, user_id: int) -> Action | None:
+        action = self._items.get(token)
+        return action if action is not None and action.user_id == user_id else None
 
 
 class StudioBot:
-    def __init__(self, jobs: JobManager, galleries: GalleryLookup, allowed_user_id: int | None, catalog: Catalog) -> None:
+    def __init__(
+        self,
+        jobs: JobManager,
+        galleries: GalleryLookup,
+        owner_id: int | None,
+        catalog: Catalog,
+        users: UserStore,
+        chat_for: Callable[[int], Chat] | None = None,
+    ) -> None:
         self.jobs = jobs
         self.galleries = galleries
-        self.allowed_user_id = allowed_user_id
+        self.owner_id = owner_id
         self.catalog = catalog
-        self.model_key: str | None = None  # None = Studio's default model
-        self.style_key = "none"
+        self.users = users
+        self.chat_for = chat_for  # opens a chat with any user (set by the Telegram adapter)
         self.actions = ActionStore()
+        self._prefs: dict[int, Prefs] = {}
+
+    def prefs_for(self, user_id: int) -> Prefs:
+        return self._prefs.setdefault(user_id, Prefs())
 
     # --- entry points ---------------------------------------------------------
 
-    async def handle_text(self, user_id: int, text: str, chat: Chat) -> None:
-        if not await self._authorized(user_id, chat):
+    async def handle_text(self, user_id: int, text: str, chat: Chat, who: str = "") -> None:
+        if not await self._admitted(user_id, who, chat):
             return
+        prefs = self.prefs_for(user_id)
         command = command_name(text)
         if command == "model":
-            await self._model_menu(chat)
-            return
-        if command == "style":
-            await self._style_menu(chat)
-            return
-        shape, prompt = parse_request(text)
-        if shape is None:
-            await chat.send_text(f"{HELP}\n\nNow: {await self._settings_line()}")
-        elif not prompt:
-            await chat.send_text(f"Add a prompt after the command, e.g. /{shape} an old fisherman")
+            await self._model_menu(prefs, chat)
+        elif command == "style":
+            await self._style_menu(prefs, chat)
+        elif command == "users" and user_id == self.owner_id:
+            await self._users_menu(chat)
         else:
-            await self._generate(shape, prompt, chat)
+            shape, prompt = parse_request(text)
+            if shape is None:
+                extra = OWNER_HELP if user_id == self.owner_id else ""
+                await chat.send_text(f"{HELP}{extra}\n\nNow: {await self._settings_line(prefs)}")
+            elif not prompt:
+                await chat.send_text(f"Add a prompt after the command, e.g. /{shape} an old fisherman")
+            else:
+                await self._generate(shape, prompt, prefs, user_id, chat)
 
-    async def handle_button(self, user_id: int, data: str, chat: Chat) -> None:
-        if not await self._authorized(user_id, chat):
+    async def handle_button(self, user_id: int, data: str, chat: Chat, who: str = "") -> None:
+        if not await self._admitted(user_id, who, chat):
             return
         kind, _, value = data.partition(":")
-        if kind == "model":
-            await self._choose_model(value, chat)
+        if kind in ("allow", "deny", "remove"):
+            if user_id == self.owner_id and value.isdigit():
+                await self._decide(kind, int(value), chat)
+        elif kind == "model":
+            await self._choose_model(value, self.prefs_for(user_id), chat)
         elif kind == "style":
-            await self._choose_style(value, chat)
+            await self._choose_style(value, self.prefs_for(user_id), chat)
         elif kind in ("vary", "x4", "up"):
-            action = self.actions.get(value)
+            action = self.actions.get(value, user_id)
             if action is None:
                 await chat.send_text(EXPIRED)
             elif kind == "vary":
-                await self._run(replace(action.params, seed=None, batch=1), chat)
+                await self._run(replace(action.params, seed=None, batch=1), chat, user_id)
             elif kind == "x4":
-                await self._four_more(action.params, chat)
+                await self._four_more(action.params, chat, user_id)
             else:
-                await self._upscale(action, chat)
+                await self._upscale(action, chat, user_id)
+
+    # --- access --------------------------------------------------------------
+
+    async def _admitted(self, user_id: int, who: str, chat: Chat) -> bool:
+        if self.owner_id is None:
+            log.info("Telegram setup: add TELEGRAM_ALLOWED_USER_ID=%s to .env to allow this user", user_id)
+            await chat.send_text(
+                f"👋 Your Telegram user ID is {user_id}.\n"
+                f"Add TELEGRAM_ALLOWED_USER_ID={user_id} to .env and restart ComfyUI Studio."
+            )
+            return False
+        if user_id == self.owner_id or self.users.is_allowed(user_id):
+            return True
+        if self.users.is_denied(user_id):
+            log.info("Ignoring Telegram message from denied user %s", user_id)
+        elif self.users.is_pending(user_id):
+            await chat.send_text(PENDING)
+        else:
+            await self._ask_owner(user_id, who or f"user {user_id}", chat)
+        return False
+
+    async def _ask_owner(self, user_id: int, who: str, chat: Chat) -> None:
+        self.users.add_pending(user_id, who)
+        await chat.send_text(REQUEST_SENT)
+        if self.chat_for is not None:
+            buttons = [[("✅ Allow", f"allow:{user_id}"), ("🚫 Deny", f"deny:{user_id}")]]
+            await self.chat_for(self.owner_id).send_text(f"👤 {who} (id {user_id}) wants to use your bot.", buttons)
+
+    async def _decide(self, kind: str, target: int, chat: Chat) -> None:
+        name = self.users.name_of(target)
+        if kind == "allow":
+            self.users.allow(target)
+            await chat.send_text(f"✅ {name} can use the bot now. Remove them any time with /users.")
+            await self._tell(target, WELCOME)
+        elif kind == "deny":
+            self.users.deny(target)
+            await chat.send_text(f"🚫 {name} won't be able to use the bot.")
+            await self._tell(target, DENIED_NOTICE)
+        else:
+            self.users.remove(target)
+            await chat.send_text(f"Removed {name}. They'd have to ask again to use the bot.")
+
+    async def _tell(self, user_id: int, text: str) -> None:
+        if self.chat_for is not None:
+            await self.chat_for(user_id).send_text(text)
+
+    async def _users_menu(self, chat: Chat) -> None:
+        people = self.users.allowed_users()
+        if not people:
+            await chat.send_text("Nobody else can use the bot yet. When someone messages it, you'll get Allow / Deny buttons.")
+            return
+        lines = "\n".join(f"• {name}" for _, name in people)
+        buttons = [[(f"Remove {name}", f"remove:{uid}")] for uid, name in people]
+        await chat.send_text(f"People who can use your bot:\n{lines}", buttons)
 
     # --- settings ------------------------------------------------------------
 
-    async def _profile(self) -> ModelProfile | None:
-        return resolve_profile(self.model_key, await self.catalog.available())
+    async def _profile(self, prefs: Prefs) -> ModelProfile | None:
+        return resolve_profile(prefs.model_key, await self.catalog.available())
 
-    async def _settings_line(self) -> str:
+    async def _settings_line(self, prefs: Prefs) -> str:
         try:
-            profile = await self._profile()
+            profile = await self._profile(prefs)
         except InvalidParamsError:
             profile = None
-        style = style_by_key(self.style_key)
+        style = style_by_key(prefs.style_key)
         return f"{profile.label if profile else 'default model'} · {style.emoji} {style.label}"
 
-    async def _model_menu(self, chat: Chat) -> None:
+    async def _model_menu(self, prefs: Prefs, chat: Chat) -> None:
         available = await self.catalog.available()
         try:
-            current = resolve_profile(self.model_key, available) if available else None
+            current = resolve_profile(prefs.model_key, available) if available else None
         except InvalidParamsError:  # the chosen model was removed from ComfyUI
             current = default_profile(available)
         rows = [[(("✓ " if p == current else "") + p.label, f"model:{p.key}")] for p in available]
         await chat.send_text("Choose a model:" if rows else "ComfyUI isn't reachable right now.", rows or None)
 
-    async def _choose_model(self, key: str, chat: Chat) -> None:
+    async def _choose_model(self, key: str, prefs: Prefs, chat: Chat) -> None:
         try:
             profile = resolve_profile(key, await self.catalog.available())
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        self.model_key = key
+        prefs.model_key = key
         note = " It's heavy: about 30–60 s per image, 1 at a time, no ×4 or upscale." if profile.heavy else ""
         await chat.send_text(f"Model: {profile.label}.{note}")
 
-    async def _style_menu(self, chat: Chat) -> None:
-        buttons = [(("✓ " if s.key == self.style_key else "") + f"{s.emoji} {s.label}", f"style:{s.key}") for s in STYLES]
+    async def _style_menu(self, prefs: Prefs, chat: Chat) -> None:
+        buttons = [(("✓ " if s.key == prefs.style_key else "") + f"{s.emoji} {s.label}", f"style:{s.key}") for s in STYLES]
         await chat.send_text("Choose a style:", [buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
-    async def _choose_style(self, key: str, chat: Chat) -> None:
+    async def _choose_style(self, key: str, prefs: Prefs, chat: Chat) -> None:
         try:
             style = style_by_key(key)
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        self.style_key = key
+        prefs.style_key = key
         await chat.send_text(f"Style: {style.emoji} {style.label}.")
 
     # --- jobs ----------------------------------------------------------------
 
-    async def _generate(self, shape: str, prompt: str, chat: Chat) -> None:
+    async def _generate(self, shape: str, prompt: str, prefs: Prefs, user_id: int, chat: Chat) -> None:
         try:
-            profile = await self._profile()
+            profile = await self._profile(prefs)
         except InvalidParamsError as exc:
-            if self.model_key is None:
+            if prefs.model_key is None:
                 await chat.send_text(f"⚠️ {exc}")
                 return
-            self.model_key = None  # the chosen model was removed: fall back instead of getting stuck
+            prefs.model_key = None  # the chosen model was removed: fall back instead of getting stuck
             try:
-                profile = await self._profile()
+                profile = await self._profile(prefs)
             except InvalidParamsError as again:
                 await chat.send_text(f"⚠️ {again}")
                 return
@@ -218,23 +311,23 @@ class StudioBot:
             params = build_generation(
                 prompt=prompt, negative_prompt=DEFAULT_NEGATIVE, width=width, height=height,
                 steps=profile.steps if profile else 20, cfg=profile.cfg if profile else 8.0,
-                seed=None, batch=1, style=self.style_key, profile=profile,
+                seed=None, batch=1, style=prefs.style_key, profile=profile,
             )
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        await self._run(params, chat)
+        await self._run(params, chat, user_id)
 
-    async def _four_more(self, params: GenerationParams, chat: Chat) -> None:
+    async def _four_more(self, params: GenerationParams, chat: Chat, user_id: int) -> None:
         params = replace(params, seed=None, batch=4)
         try:
             check_limits(profile_for_ckpt(params.model or "") or FALLBACK_LIMITS, params.width, params.height, 4)
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        await self._run(params, chat)
+        await self._run(params, chat, user_id)
 
-    async def _upscale(self, action: Action, chat: Chat) -> None:
+    async def _upscale(self, action: Action, chat: Chat, user_id: int) -> None:
         gallery = await self.galleries.get()
         try:
             if gallery is None or action.image_name is None:
@@ -247,9 +340,9 @@ class StudioBot:
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        await self._run(request, chat)
+        await self._run(request, chat, user_id)
 
-    async def _run(self, request: JobRequest, chat: Chat) -> None:
+    async def _run(self, request: JobRequest, chat: Chat, user_id: int) -> None:
         try:
             job = self.jobs.start(request)
         except BusyError:
@@ -267,9 +360,9 @@ class StudioBot:
             elif event["type"] == "error":
                 await chat.edit_text(status, f"⚠️ {event['message']}")
             elif event["type"] == "done":
-                await self._deliver(request, event, status, chat)
+                await self._deliver(request, event, status, chat, user_id)
 
-    async def _deliver(self, request: JobRequest, event: dict[str, Any], status: int, chat: Chat) -> None:
+    async def _deliver(self, request: JobRequest, event: dict[str, Any], status: int, chat: Chat, user_id: int) -> None:
         images = event.get("images") or ([event["image"]] if event.get("image") else [])
         gallery = await self.galleries.get()
         if not images or gallery is None:
@@ -283,40 +376,29 @@ class StudioBot:
             caption = caption_for(request, event["seed"], event["elapsed"], self._model_label(request))
             if len(paths) > 1:
                 await chat.send_album(paths, caption)
-                await chat.send_text("Upscale your favourite, or make 4 more:", self._picker_buttons(request, images))
+                await chat.send_text("Upscale your favourite, or make 4 more:", self._picker_buttons(request, images, user_id))
             else:
-                await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"]))
+                await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"], user_id))
         await chat.delete(status)
 
-    def _photo_buttons(self, params: GenerationParams, image_name: str) -> Buttons:
+    def _photo_buttons(self, params: GenerationParams, image_name: str, user_id: int) -> Buttons:
         profile = profile_for_ckpt(params.model or "") or FALLBACK_LIMITS
         small = max(params.width, params.height) <= UPSCALE_MAX_SIDE
-        reuse = self.actions.put(params, None)
+        reuse = self.actions.put(params, None, user_id)
         row = [("🔁 Vary", f"vary:{reuse}")]
         if profile.max_batch >= 4 and small:
             row.append(("🖼️ ×4", f"x4:{reuse}"))
         if profile.upscale and small:
-            row.append(("🔍 Upscale", f"up:{self.actions.put(params, image_name)}"))
+            row.append(("🔍 Upscale", f"up:{self.actions.put(params, image_name, user_id)}"))
         return [row]
 
-    def _picker_buttons(self, params: GenerationParams, images: list[dict[str, Any]]) -> Buttons:
-        upscale_row = [(f"🔍 {n}", f"up:{self.actions.put(params, image['name'])}") for n, image in enumerate(images, 1)]
-        return [upscale_row, [("🖼️ ×4 again", f"x4:{self.actions.put(params, None)}")]]
+    def _picker_buttons(self, params: GenerationParams, images: list[dict[str, Any]], user_id: int) -> Buttons:
+        upscale_row = [
+            (f"🔍 {n}", f"up:{self.actions.put(params, image['name'], user_id)}") for n, image in enumerate(images, 1)
+        ]
+        return [upscale_row, [("🖼️ ×4 again", f"x4:{self.actions.put(params, None, user_id)}")]]
 
     @staticmethod
     def _model_label(params: GenerationParams) -> str:
         profile = profile_for_ckpt(params.model or "")
         return profile.label if profile else "Stable Diffusion"
-
-    async def _authorized(self, user_id: int, chat: Chat) -> bool:
-        if self.allowed_user_id is None:
-            log.info("Telegram setup: add TELEGRAM_ALLOWED_USER_ID=%s to .env to allow this user", user_id)
-            await chat.send_text(
-                f"👋 Your Telegram user ID is {user_id}.\n"
-                f"Add TELEGRAM_ALLOWED_USER_ID={user_id} to .env and restart ComfyUI Studio."
-            )
-            return False
-        if user_id != self.allowed_user_id:
-            log.warning("Ignoring Telegram message from user %s", user_id)
-            return False
-        return True

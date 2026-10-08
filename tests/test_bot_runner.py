@@ -101,9 +101,9 @@ class FakeStudio:
     def __init__(self) -> None:
         self.button_calls: list[tuple] = []
 
-    async def handle_text(self, user_id, text, chat) -> None: ...
+    async def handle_text(self, user_id, text, chat, who="") -> None: ...
 
-    async def handle_button(self, user_id, data, chat) -> None:
+    async def handle_button(self, user_id, data, chat, who="") -> None:
         self.button_calls.append((user_id, data, chat._chat_id))
 
 
@@ -129,7 +129,7 @@ def test_vary_on_inaccessible_message_uses_effective_chat() -> None:
 
     old_message = SimpleNamespace()  # like telegram.InaccessibleMessage: no .chat_id attribute
     query = SimpleNamespace(data="vary:tok123", message=old_message, from_user=SimpleNamespace(id=42), answer=answer)
-    update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=555))
+    update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=555, type="private"))
     asyncio.run(handler.callback(update, SimpleNamespace(bot=object())))
     assert studio.button_calls == [(42, "vary:tok123", 555)]
 
@@ -218,3 +218,29 @@ def test_runner_calls_on_started_and_survives_its_failure() -> None:
 
     asyncio.run(scenario())
     assert log[:4] == ["initialize", "start", "poll drop=True", "on_started"] and log[-1] == "shutdown"
+
+
+def test_group_chats_are_ignored() -> None:
+    from types import SimpleNamespace
+
+    from telegram.ext import MessageHandler
+
+    from web.bot import build_application
+
+    calls: list = []
+
+    class Studio(FakeStudio):
+        async def handle_text(self, user_id, text, chat, who="") -> None:
+            calls.append((user_id, text, who))
+
+    application = build_application("123:abc", Studio())
+    handler = next(h for h in application.handlers[0] if isinstance(h, MessageHandler))
+    user = SimpleNamespace(id=42, full_name="Ann Lee", username="ann")
+
+    def update(chat_type: str):
+        message = SimpleNamespace(text="a cat", chat_id=7)
+        return SimpleNamespace(effective_message=message, effective_user=user, effective_chat=SimpleNamespace(id=7, type=chat_type))
+
+    asyncio.run(handler.callback(update("group"), SimpleNamespace(bot=object())))
+    asyncio.run(handler.callback(update("private"), SimpleNamespace(bot=object())))
+    assert calls == [(42, "a cat", "Ann Lee (@ann)")]
