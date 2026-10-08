@@ -19,6 +19,8 @@ class Settings:
     timeout: float
     comfyui_output_dir: Path | None
     cache_dir: Path
+    telegram_bot_token: str | None = None
+    telegram_allowed_user_id: int | None = None
 
 
 def _resolve(path_str: str) -> Path:
@@ -30,6 +32,11 @@ def _resolve(path_str: str) -> Path:
     return path if path.is_absolute() else PROJECT_DIR / path
 
 
+def _int_or_none(raw: str) -> int | None:
+    raw = raw.strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def load_settings() -> Settings:
     load_dotenv(PROJECT_DIR / ".env")
     return Settings(
@@ -39,4 +46,6 @@ def load_settings() -> Settings:
         timeout=float(os.getenv("TIMEOUT", "180")),
         comfyui_output_dir=_resolve(raw) if (raw := os.getenv("COMFYUI_OUTPUT_DIR", "").strip()) else None,
         cache_dir=_resolve(os.getenv("CACHE_DIR", "cache")),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None,
+        telegram_allowed_user_id=_int_or_none(os.getenv("TELEGRAM_ALLOWED_USER_ID", "")),
     )
