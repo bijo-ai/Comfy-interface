@@ -76,6 +76,22 @@ select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px color-
 .strength span { grid-row: 1; grid-column: 2; color: var(--text); }
 .source-clear { align-self: flex-start; padding: 4px 10px; }
 .composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.source-fix { text-align: left; font-size: 13px; padding: 7px 12px; }
+
+/* Painter (inpainting) */
+.painter { width: min(1280px, 96vw); height: min(860px, 92vh); padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); }
+.painter::backdrop { background: rgba(0, 0, 0, .78); backdrop-filter: blur(6px); }
+.painter-body { display: grid; grid-template-columns: 1fr 340px; height: 100%; }
+.painter-stage { background: #000; display: grid; place-items: center; min-height: 0; padding: 12px; }
+.painter-canvases { position: relative; }
+.painter-canvases canvas { display: block; }
+#painter-mask { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; opacity: .55; }
+.painter-tools { padding: 22px; display: flex; flex-direction: column; gap: 10px; position: relative; overflow-y: auto; }
+.painter-tools h3 { margin: 0; font-size: 16px; }
+.painter-tools p { margin: 0; font-size: 13px; }
+.painter-modes { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+.painter-tools .generate { margin-top: auto; }
+@media (max-width: 900px) { .painter-body { grid-template-columns: 1fr; grid-template-rows: 50% 1fr; } }
 .shape:disabled { opacity: .35; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {

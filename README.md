@@ -50,6 +50,19 @@ A local website for generating and browsing images without an LLM. Type a prompt
   - **Size:** the result keeps the picture's shape, resized to fit the model (768 px for SD 1.5 / DreamShaper,
     1024 px for SDXL), so big phone photos can't overload the GPU.
   - **Storage:** uploads are kept in `cache/sources/`.
+- **Inpainting (fix part of an image):** **🖌️ Fix part of this image** in the image viewer, or
+  **🖌️ Fix part of it instead** on a start image. This opens a painter:
+  1. Brush over what should change, using 🖌️ Paint / 🧽 Erase, brush size and Clear.
+  2. Describe the whole picture including the change ("a man wearing a red beanie", not "add a hat").
+  3. Click **Fix it**.
+
+  Only the painted area is regenerated, with the DreamShaper 8 *Inpainting* model. Everything you didn't paint
+  keeps **exactly** the original pixels: the result is composited onto the original with a soft edge.
+  - **Model:** this needs `DreamShaper_8_INPAINTING.inpainting.safetensors` in ComfyUI's `models/checkpoints`
+    (`Lykon/DreamShaper` on Hugging Face). The buttons only appear when it's installed. It isn't offered as a
+    normal model.
+  - **Size:** images are fitted to 768 px for inpainting. The GPU load is the same as a normal image (~6–8 s).
+  - Inpainting is Studio-only: there's no way to paint a mask in Telegram.
 - **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
   ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
 - **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made

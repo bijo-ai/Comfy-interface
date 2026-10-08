@@ -13,6 +13,7 @@ const els = {
   model: $("#model"), modelNote: $("#model-note"), styles: $("#styles"), counts: [...document.querySelectorAll(".count")],
   source: $("#source"), sourcePick: $("#source-pick"), sourceFile: $("#source-file"), sourceThumb: $("#source-thumb"),
   sourceSize: $("#source-size"), sourceClear: $("#source-clear"), strength: $("#strength"), strengthValue: $("#strength-value"),
+  sourceFix: $("#source-fix"),
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
 };
@@ -21,10 +22,17 @@ const lb = {
   nometa: $("#lb-nometa"), reuse: $("#lb-reuse"), vary: $("#lb-vary"), download: $("#lb-download"),
   remove: $("#lb-delete"), confirm: $("#lb-confirm"), confirmYes: $("#lb-confirm-yes"), confirmNo: $("#lb-confirm-no"),
   prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"), upscale: $("#lb-upscale"), edit: $("#lb-edit"),
+  fix: $("#lb-fix"),
+};
+const painter = {
+  dialog: $("#painter"), image: $("#painter-image"), mask: $("#painter-mask"), close: $("#painter-close"),
+  paint: $("#mode-paint"), erase: $("#mode-erase"), clear: $("#painter-clear"), brush: $("#brush"),
+  brushValue: $("#brush-value"), prompt: $("#painter-prompt"), go: $("#painter-go"),
 };
 const state = {
   images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
-  models: [], model: null, modelSignature: "", style: "none", count: 1, source: null,
+  models: [], model: null, modelSignature: "", style: "none", count: 1, source: null, inpaint: false,
+  painting: null, // { source fields, width, height } while the painter is open
 };
 const MAX_BATCH_SIDE = 768;
 const UPSCALE_MAX_SIDE = 768;
@@ -80,6 +88,7 @@ async function loadModels() {
     return; // Studio server unreachable; the next status tick retries
   }
   if (!els.styles.children.length) renderStyles(data.styles);
+  setInpaintAvailable(Boolean(data.inpaint));
   const available = data.models.filter((model) => model.available);
   const signature = available.map((model) => model.key).join(",");
   if (!available.length || signature === state.modelSignature) return;
@@ -170,7 +179,127 @@ function setSource(source) {
   const [width, height] = sourceSize();
   els.sourceSize.textContent = `Made at ${width}×${height}`;
   for (const button of els.shapes) button.disabled = true; // the start image sets the shape
+  els.sourceFix.hidden = !state.inpaint;
   syncCount();
+}
+
+// --- painter (inpainting) -----------------------------------------------------
+
+const MASK_COLOR = "rgb(242, 181, 68)"; // painted solid; the layer itself is see-through (even overlaps)
+const brush = { erasing: false, drawing: false, last: null };
+
+function setInpaintAvailable(available) {
+  state.inpaint = available;
+  els.sourceFix.hidden = !available || !state.source;
+}
+
+function openPainter(target) {
+  // target: { url, width, height, source_id | source_name, prompt }
+  state.painting = target;
+  const picture = new Image();
+  picture.onload = () => {
+    for (const canvas of [painter.image, painter.mask]) {
+      canvas.width = picture.naturalWidth;
+      canvas.height = picture.naturalHeight;
+    }
+    painter.image.getContext("2d").drawImage(picture, 0, 0);
+    painter.mask.getContext("2d").clearRect(0, 0, painter.mask.width, painter.mask.height);
+    fitPainter();
+  };
+  picture.src = target.url;
+  painter.prompt.value = target.prompt ?? "";
+  setBrushMode(false);
+  if (!painter.dialog.open) painter.dialog.showModal();
+}
+
+function fitPainter() {
+  // show the picture as large as the editor allows (small 512 px images get scaled up for easier painting)
+  const stage = painter.image.closest(".painter-stage");
+  const scale = Math.min((stage.clientWidth - 24) / painter.image.width, (stage.clientHeight - 24) / painter.image.height);
+  painter.image.style.width = `${Math.floor(painter.image.width * scale)}px`;
+  painter.image.style.height = `${Math.floor(painter.image.height * scale)}px`;
+}
+
+function setBrushMode(erasing) {
+  brush.erasing = erasing;
+  painter.paint.setAttribute("aria-checked", String(!erasing));
+  painter.erase.setAttribute("aria-checked", String(erasing));
+}
+
+function maskPoint(event) {
+  const rect = painter.mask.getBoundingClientRect();
+  return [
+    (event.clientX - rect.left) * (painter.mask.width / rect.width),
+    (event.clientY - rect.top) * (painter.mask.height / rect.height),
+  ];
+}
+
+function strokeTo(point) {
+  const ctx = painter.mask.getContext("2d");
+  const scale = painter.mask.width / painter.mask.getBoundingClientRect().width;
+  ctx.globalCompositeOperation = brush.erasing ? "destination-out" : "source-over";
+  ctx.strokeStyle = MASK_COLOR;
+  ctx.fillStyle = MASK_COLOR;
+  ctx.lineWidth = Number(painter.brush.value) * scale;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  const [x0, y0] = brush.last ?? point;
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(point[0], point[1]);
+  ctx.stroke();
+  brush.last = point;
+}
+
+function hasPaint() {
+  const { data } = painter.mask.getContext("2d").getImageData(0, 0, painter.mask.width, painter.mask.height);
+  for (let i = 3; i < data.length; i += 4) if (data[i]) return true;
+  return false;
+}
+
+function maskBlob() {
+  // white where painted, black elsewhere
+  const out = document.createElement("canvas");
+  out.width = painter.mask.width;
+  out.height = painter.mask.height;
+  const ctx = out.getContext("2d");
+  const source = painter.mask.getContext("2d").getImageData(0, 0, out.width, out.height);
+  const pixels = ctx.createImageData(out.width, out.height);
+  for (let i = 0; i < source.data.length; i += 4) {
+    const value = source.data[i + 3] ? 255 : 0;
+    pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
+    pixels.data[i + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  return new Promise((resolve) => out.toBlob(resolve, "image/png"));
+}
+
+async function runInpaint() {
+  const target = state.painting;
+  const prompt = painter.prompt.value.trim();
+  if (!prompt) {
+    toast("Describe what the picture should show.", "error");
+    painter.prompt.focus();
+    return;
+  }
+  if (!hasPaint()) {
+    toast("Paint over the area you want to change first.", "error");
+    return;
+  }
+  let maskId;
+  try {
+    maskId = (await api("/api/sources", { method: "POST", headers: { "Content-Type": "image/png" }, body: await maskBlob() })).id;
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+  painter.dialog.close();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  const [width, height] = fitSize(target.width, target.height, IMG2IMG_MAX_SIDE.sd15);
+  const body = { prompt, mask_id: maskId, style: state.style, negative_prompt: els.negative.value };
+  if (target.source_id) body.source_id = target.source_id;
+  else body.source_name = target.source_name;
+  await runJob("/api/inpaint", body, width, height);
 }
 
 function clearSource() {
@@ -178,6 +307,7 @@ function clearSource() {
   els.source.hidden = true;
   els.sourcePick.hidden = false;
   els.sourceFile.value = "";
+  els.sourceFix.hidden = true;
   for (const button of els.shapes) button.disabled = false;
   syncCount();
 }
@@ -541,6 +671,8 @@ function renderLightbox() {
   const problem = upscaleProblem(image);
   lb.upscale.disabled = Boolean(problem) || state.busy;
   lb.upscale.title = problem ?? "Make a 2× larger, sharper version";
+  lb.fix.hidden = !state.inpaint;
+  lb.fix.disabled = state.busy || !image.width;
   lb.download.href = `${imageUrl(image.name)}?download=1`;
   lb.prev.disabled = index <= 0;
   lb.next.disabled = index >= state.total - 1;
@@ -664,6 +796,43 @@ lb.edit.addEventListener("click", () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
   els.prompt.focus();
 });
+lb.fix.addEventListener("click", () => {
+  const image = currentImage();
+  lb.dialog.close();
+  openPainter({
+    url: imageUrl(image.name), width: image.width, height: image.height, source_name: image.name,
+    prompt: image.params?.prompt ?? "",
+  });
+});
+els.sourceFix.addEventListener("click", () => {
+  const source = state.source;
+  openPainter({
+    url: source.url, width: source.width, height: source.height, prompt: els.prompt.value.trim(),
+    ...(source.id ? { source_id: source.id } : { source_name: source.name }),
+  });
+});
+painter.close.addEventListener("click", () => painter.dialog.close());
+painter.paint.addEventListener("click", () => setBrushMode(false));
+painter.erase.addEventListener("click", () => setBrushMode(true));
+painter.clear.addEventListener("click", () => painter.mask.getContext("2d").clearRect(0, 0, painter.mask.width, painter.mask.height));
+painter.brush.addEventListener("input", () => { painter.brushValue.textContent = painter.brush.value; });
+painter.go.addEventListener("click", runInpaint);
+window.addEventListener("resize", () => { if (painter.dialog.open) fitPainter(); });
+painter.mask.addEventListener("pointerdown", (event) => {
+  painter.mask.setPointerCapture(event.pointerId);
+  brush.drawing = true;
+  brush.last = null;
+  strokeTo(maskPoint(event));
+});
+painter.mask.addEventListener("pointermove", (event) => {
+  if (brush.drawing) strokeTo(maskPoint(event));
+});
+for (const type of ["pointerup", "pointercancel"]) {
+  painter.mask.addEventListener(type, () => {
+    brush.drawing = false;
+    brush.last = null;
+  });
+}
 els.sourcePick.addEventListener("click", () => els.sourceFile.click());
 els.sourceFile.addEventListener("change", () => uploadSource(els.sourceFile.files[0]));
 els.sourceClear.addEventListener("click", clearSource);

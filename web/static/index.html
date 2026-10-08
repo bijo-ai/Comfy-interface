@@ -39,6 +39,7 @@
         </div>
         <button id="source-clear" class="ghost source-clear" type="button" aria-label="Remove start image">✕</button>
       </div>
+      <button id="source-fix" class="ghost source-fix" type="button" hidden>🖌️ Fix part of it instead (keep the rest exactly)</button>
 
       <label class="label" for="model">Model</label>
       <select id="model"><option value="">Default model</option></select>
@@ -118,6 +119,7 @@
           <button id="lb-vary" type="button">Vary</button>
           <button id="lb-upscale" class="wide" type="button">🔍 Upscale ×2</button>
           <button id="lb-edit" class="wide" type="button">🎨 Edit this image</button>
+          <button id="lb-fix" class="wide" type="button" hidden>🖌️ Fix part of this image</button>
           <a id="lb-download" class="button" href="#" download>Download</a>
           <button id="lb-delete" class="danger" type="button">Delete</button>
         </div>
@@ -126,6 +128,35 @@
           <button id="lb-confirm-no" class="ghost" type="button">Cancel</button>
           <button id="lb-confirm-yes" class="danger solid" type="button">Delete</button>
         </div>
+      </aside>
+    </div>
+  </dialog>
+
+  <dialog id="painter" class="painter" aria-label="Fix part of an image">
+    <div class="painter-body">
+      <div class="painter-stage">
+        <div class="painter-canvases">
+          <canvas id="painter-image"></canvas>
+          <canvas id="painter-mask" aria-label="Paint over the area to change"></canvas>
+        </div>
+      </div>
+      <aside class="painter-tools">
+        <button id="painter-close" class="lb-close ghost" type="button" aria-label="Close">✕</button>
+        <h3>Fix part of the image</h3>
+        <p class="muted">Paint over what you want to change. Everything you don't paint stays exactly the same.</p>
+        <div class="painter-modes" role="radiogroup" aria-label="Brush mode">
+          <button id="mode-paint" class="shape" type="button" role="radio" aria-checked="true">🖌️ Paint</button>
+          <button id="mode-erase" class="shape" type="button" role="radio" aria-checked="false">🧽 Erase</button>
+          <button id="painter-clear" class="ghost" type="button">Clear</button>
+        </div>
+        <label class="strength">Brush size
+          <input id="brush" type="range" min="8" max="120" step="2" value="40">
+          <span id="brush-value">40</span>
+        </label>
+        <label class="label" for="painter-prompt">What should the picture show?</label>
+        <textarea id="painter-prompt" rows="3" placeholder="photo of a smiling man wearing a red beanie"></textarea>
+        <p class="muted note">Describe the whole picture including the change (e.g. "a man wearing a red beanie"), not an instruction like "add a hat".</p>
+        <button id="painter-go" class="generate" type="button"><span class="generate-label">Fix it</span></button>
       </aside>
     </div>
   </dialog>
