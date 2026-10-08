@@ -1,3 +1,5 @@
+import { initEdit } from "./edit.js";
+
 const DEFAULT_NEGATIVE = "blurry, low quality, distorted, deformed, bad anatomy, text, watermark";
 const PAGE_SIZE = 60;
 const STATUS_INTERVAL_MS = 10_000;
@@ -16,7 +18,7 @@ const els = {
   sourceFix: $("#source-fix"),
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
-  createView: $("#create-view"), galleryView: $("#gallery-view"), tabs: [...document.querySelectorAll(".tab")],
+  createView: $("#create-view"), galleryView: $("#gallery-view"), editView: $("#edit-view"), tabs: [...document.querySelectorAll(".tab")],
   tabCount: $("#tab-count"), search: $("#gallery-search"), filters: [...document.querySelectorAll("#gallery-filters .chip")],
   tabIndicator: $(".tab-indicator"), stage: $(".stage"), stageGlow: $(".stage-glow"),
 };
@@ -38,9 +40,11 @@ const state = {
   painting: null, // { source fields, width, height } while the painter is open
   stageImages: [], // what the stage shows (one image, or a ×4 grid)
   lbList: [], // the list the lightbox steps through (the filtered gallery, or the stage's images)
-  query: "", kind: "", galleryStale: false, tab: "create",
+  query: "", kind: "", galleryStale: false, tab: "create", styles: [],
 };
 const MAX_BATCH_SIDE = 768;
+const TABS = ["create", "edit", "gallery"];
+let editor = null; // the Edit studio (edit.js), created once the page is wired up
 const UPSCALE_MAX_SIDE = 768;
 
 // --- helpers ---------------------------------------------------------------
@@ -93,6 +97,7 @@ async function loadModels() {
   } catch {
     return; // Studio server unreachable; the next status tick retries
   }
+  state.styles = data.styles;
   if (!els.styles.children.length) renderStyles(data.styles);
   setInpaintAvailable(Boolean(data.inpaint));
   const available = data.models.filter((model) => model.available);
@@ -391,6 +396,7 @@ function fillComposer(params) {
 
 function setBusy(busy) {
   state.busy = busy;
+  editor?.refresh();
   els.generate.disabled = busy;
   els.generate.classList.toggle("busy", busy);
   if (busy) {
@@ -413,7 +419,7 @@ const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const LIVE_COLS_START = 14;
 const LIVE_COLS_END = 110;
 const NOISE_FRAME_MS = 110;
-const live = { aspect: 1, noiseTimer: null, latestStep: 0 };
+const live = { aspect: 1, noiseTimer: null, latestStep: 0, inEdit: false };
 
 function liveGrid(fraction) {
   const cols = Math.round(LIVE_COLS_START + (LIVE_COLS_END - LIVE_COLS_START) * fraction ** 1.6);
@@ -442,11 +448,13 @@ function startLive(width, height) {
   live.aspect = width / height;
   live.latestStep = 0;
   els.live.style.setProperty("--aspect", String(live.aspect));
-  els.stageImg.hidden = true;
-  els.stageGrid.hidden = true;
-  els.stageEmpty.hidden = true;
+  if (!live.inEdit) {
+    els.stageImg.hidden = true;
+    els.stageGrid.hidden = true;
+    els.stageEmpty.hidden = true;
+    els.stageCaption.textContent = "Warming up…";
+  }
   els.live.hidden = false;
-  els.stageCaption.textContent = "Warming up…";
   drawNoise();
   if (!reducedMotion.matches) live.noiseTimer = setInterval(drawNoise, NOISE_FRAME_MS);
 }
@@ -476,7 +484,7 @@ function showLivePreview(jobId, step, total) {
     ctx.drawImage(frame, 0, 0, cols, rows);
   };
   frame.src = `/api/jobs/${jobId}/preview?step=${step}`;
-  els.stageCaption.textContent = `Forming · step ${step} / ${total}`;
+  if (!live.inEdit) els.stageCaption.textContent = `Forming · step ${step} / ${total}`;
 }
 
 // --- generation ------------------------------------------------------------
@@ -518,10 +526,14 @@ async function upscaleImage(image) {
   await runJob("/api/upscale", { name: image.name }, image.width, image.height);
 }
 
-async function runJob(path, body, width, height) {
+// Jobs normally preview and finish on Create's stage; Edit passes its own host for the live preview and
+// its own handler for the result.
+async function runJob(path, body, width, height, { liveHost = null, onDone = null } = {}) {
   if (state.busy) return;
-  showTab("create"); // jobs started from the gallery's viewer show their live preview here
+  if (!liveHost) showTab("create"); // jobs started from the gallery's viewer show their live preview here
   setBusy(true);
+  live.inEdit = Boolean(liveHost);
+  if (liveHost) liveHost.append(els.live);
   startLive(width, height);
   try {
     const { job_id: jobId } = await api(path, {
@@ -529,12 +541,16 @@ async function runJob(path, body, width, height) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    onGenerated(await followJob(jobId));
+    const event = await followJob(jobId);
+    if (onDone) onDone(event);
+    else onGenerated(event);
   } catch (error) {
     toast(error.message, "error");
-    restoreStage();
+    if (!liveHost) restoreStage();
   } finally {
     stopLive();
+    if (liveHost) els.stage.insertBefore(els.live, els.stageCaption);
+    live.inEdit = false;
     setBusy(false);
   }
 }
@@ -706,9 +722,11 @@ function onSearch() {
 // --- tabs ------------------------------------------------------------------
 
 function showTab(name) {
-  state.tab = name === "gallery" ? "gallery" : "create";
+  state.tab = TABS.includes(name) ? name : "create";
   els.createView.hidden = state.tab !== "create";
   els.galleryView.hidden = state.tab !== "gallery";
+  els.editView.hidden = state.tab !== "edit";
+  if (state.tab === "edit") editor?.shown();
   for (const tab of els.tabs) {
     if (tab.dataset.tab === state.tab) tab.setAttribute("aria-current", "page");
     else tab.removeAttribute("aria-current");
@@ -907,20 +925,13 @@ lb.vary.addEventListener("click", () => {
 });
 lb.edit.addEventListener("click", () => {
   const image = currentImage();
-  setSource({ name: image.name, width: image.width, height: image.height, url: imageUrl(image.name) });
-  if (!els.prompt.value.trim() && image.params) els.prompt.value = image.params.prompt;
   lb.dialog.close();
-  showTab("create");
-  window.scrollTo({ top: 0, behavior: "smooth" });
-  els.prompt.focus();
+  editor.open(image, "restyle");
 });
 lb.fix.addEventListener("click", () => {
   const image = currentImage();
   lb.dialog.close();
-  openPainter({
-    url: imageUrl(image.name), width: image.width, height: image.height, source_name: image.name,
-    prompt: image.params?.prompt ?? "",
-  });
+  editor.open(image, "fix");
 });
 els.sourceFix.addEventListener("click", () => {
   const source = state.source;
@@ -969,7 +980,8 @@ document.addEventListener("paste", (event) => {
   const file = [...event.clipboardData.files].find((item) => item.type.startsWith("image/"));
   if (file) {
     event.preventDefault();
-    uploadSource(file);
+    if (state.tab === "edit") editor.openFile(file);
+    else uploadSource(file);
   }
 });
 lb.upscale.addEventListener("click", () => {
@@ -990,6 +1002,18 @@ lb.confirmNo.addEventListener("click", () => {
   lb.remove.hidden = false;
 });
 lb.confirmYes.addEventListener("click", deleteCurrent);
+
+editor = initEdit({
+  api, toast, imageUrl, runJob, fitSize, showTab,
+  getModelKey: () => state.model?.key ?? null,
+  getStyles: () => state.styles,
+  liveMaxSide: () => IMG2IMG_MAX_SIDE[state.model?.family ?? "sd15"],
+  onNewImages: () => {
+    state.galleryStale = true;
+    refreshCounts();
+  },
+  isBusy: () => state.busy,
+});
 
 els.negative.value = DEFAULT_NEGATIVE;
 loadModels();

@@ -69,7 +69,18 @@ A local website for generating and browsing images without an LLM. Type a prompt
   - **In Telegram:** use `/fix` (see the Telegram section).
 - **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
   ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
-- **Two tabs:** **Create** (the generator and your latest result) and **Gallery** (every image).
+- **Three tabs:** **Create** (the generator and your latest result), **Edit** (the LUMOS editing studio) and
+  **Gallery** (every image).
+- **Edit (LUMOS Edit):** open any image with **✏️ Open in Edit** (image viewer), or drop or paste a photo onto Edit.
+  - **AI tools:** 🖌️ **Fix** (brush the area, describe it), 🎨 **Restyle** (prompt + strength + style),
+    🔍 **Upscale ×2**. They show the live preview on the Edit canvas and are saved to the Gallery automatically.
+  - **Instant tools (no GPU):** ✂️ **Crop** (Free · 1:1 · 4:5 · 3:2 · 16:9 · 9:16; drag to draw or move), rotate,
+    flip; ☀️ **Adjust** (brightness, contrast, saturation, warmth); 🎞️ **Filters** (Vivid, Matte, Noir, Warm film,
+    Cool, Fade).
+  - **Drafts:** instant edits are drafts (marked •) until **💾 Save**, which stores them as `LUMOS_edit_…png` with
+    the original's prompt and settings.
+  - **History:** every step is a version in the strip below the canvas. Click one to go back; nothing is overwritten.
+  - **View:** ◐ **Compare** before/after with a slider; Fit / 100% / mouse-wheel zoom; drag to pan.
   The address remembers the tab (`#gallery`), so reload and the back button work.
 - **Gallery:** every PNG in ComfyUI's output folder, newest first. That includes images you made in ComfyUI
   itself, along with the prompt and settings stored in each file.

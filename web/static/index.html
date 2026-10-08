@@ -22,6 +22,7 @@
     <nav class="tabs" aria-label="Sections">
       <span class="tab-indicator" aria-hidden="true"></span>
       <a href="#create" class="tab" data-tab="create">Create</a>
+      <a href="#edit" class="tab" data-tab="edit">Edit</a>
       <a href="#gallery" class="tab" data-tab="gallery">Gallery <span id="tab-count" class="tab-count"></span></a>
     </nav>
     <div id="status" class="status" data-state="checking" role="status">
@@ -103,6 +104,123 @@
     </section>
   </main>
 
+  <section id="edit-view" class="edit-view" aria-label="Edit" hidden>
+    <div id="edit-empty" class="edit-empty panel">
+      <div class="edit-empty-orb" aria-hidden="true"></div>
+      <h2>LUMOS Edit</h2>
+      <p class="muted">Open any image from the Gallery with <strong>✏️ Open in Edit</strong>, or drop or paste a photo here.</p>
+      <button id="edit-pick" class="ghost" type="button">📤 Choose a photo</button>
+      <input id="edit-file" type="file" accept="image/*" hidden>
+    </div>
+
+    <div id="edit-workspace" class="edit-workspace" hidden>
+      <nav class="edit-tools panel" aria-label="Edit tools">
+        <button type="button" class="tool" data-tool="fix" aria-pressed="false"><span aria-hidden="true">🖌️</span>Fix</button>
+        <button type="button" class="tool" data-tool="restyle" aria-pressed="true"><span aria-hidden="true">🎨</span>Restyle</button>
+        <button type="button" class="tool" data-tool="upscale" aria-pressed="false"><span aria-hidden="true">🔍</span>Upscale</button>
+        <span class="tool-divider" aria-hidden="true"></span>
+        <button type="button" class="tool" data-tool="crop" aria-pressed="false"><span aria-hidden="true">✂️</span>Crop</button>
+        <button type="button" class="tool" data-tool="adjust" aria-pressed="false"><span aria-hidden="true">☀️</span>Adjust</button>
+        <button type="button" class="tool" data-tool="filters" aria-pressed="false"><span aria-hidden="true">🎞️</span>Filters</button>
+      </nav>
+
+      <div class="edit-main">
+        <div id="edit-canvas" class="edit-canvas panel">
+          <div id="edit-frame" class="edit-frame">
+            <img id="edit-img" alt="Image being edited">
+            <div id="edit-tint" class="edit-tint" hidden></div>
+            <img id="edit-before" class="edit-before" alt="Original" hidden>
+            <canvas id="edit-mask" class="edit-mask" hidden></canvas>
+            <div id="edit-crop" class="edit-crop" hidden></div>
+          </div>
+          <div id="edit-live-host" class="edit-live-host"></div>
+          <div class="edit-view-controls glass">
+            <button id="edit-compare" class="ghost small" type="button" aria-pressed="false">◐ Compare</button>
+            <input id="edit-compare-range" type="range" min="0" max="100" value="50" aria-label="Before and after" hidden>
+            <span class="edit-controls-gap"></span>
+            <button id="edit-fit" class="ghost small" type="button">Fit</button>
+            <button id="edit-100" class="ghost small" type="button">100%</button>
+            <span id="edit-zoom" class="muted edit-zoom">100%</span>
+          </div>
+        </div>
+        <div id="edit-history" class="edit-history panel" aria-label="History"></div>
+      </div>
+
+      <aside class="edit-panel panel" aria-label="Tool settings">
+        <div class="edit-panel-head">
+          <h3 id="edit-tool-title">Restyle</h3>
+          <button id="edit-save" class="ghost small" type="button" disabled>💾 Save</button>
+        </div>
+
+        <div data-panel="fix" hidden>
+          <p class="muted">Paint over what should change. Everything you don't paint stays exactly the same.</p>
+          <div class="painter-modes" role="radiogroup" aria-label="Brush mode">
+            <button id="edit-paint" class="shape" type="button" role="radio" aria-checked="true">🖌️ Paint</button>
+            <button id="edit-erase" class="shape" type="button" role="radio" aria-checked="false">🧽 Erase</button>
+            <button id="edit-clear-mask" class="ghost" type="button">Clear</button>
+          </div>
+          <label class="strength">Brush size <input id="edit-brush" type="range" min="8" max="140" step="2" value="44"><span id="edit-brush-value">44</span></label>
+          <label class="label" for="edit-fix-prompt">What should the picture show?</label>
+          <textarea id="edit-fix-prompt" rows="3" placeholder="a man wearing a red beanie hat"></textarea>
+          <button id="edit-fix-go" class="generate" type="button"><span class="generate-label">Fix it</span></button>
+        </div>
+
+        <div data-panel="restyle">
+          <p class="muted">Repaint the whole picture following your words. Lower strength keeps more of the original.</p>
+          <label class="label" for="edit-restyle-prompt">Describe the picture</label>
+          <textarea id="edit-restyle-prompt" rows="3" placeholder="the same scene in winter, snow, storybook illustration"></textarea>
+          <label class="strength">How much to change <input id="edit-restyle-strength" type="range" min="0.2" max="0.9" step="0.05" value="0.55"><span id="edit-restyle-strength-value">Balanced</span></label>
+          <label class="label" for="edit-restyle-style">Style</label>
+          <select id="edit-restyle-style"><option value="none">✨ None</option></select>
+          <button id="edit-restyle-go" class="generate" type="button"><span class="generate-label">Restyle</span></button>
+        </div>
+
+        <div data-panel="upscale" hidden>
+          <p id="edit-upscale-info" class="muted"></p>
+          <button id="edit-upscale-go" class="generate" type="button"><span class="generate-label">Upscale ×2</span></button>
+        </div>
+
+        <div data-panel="crop" hidden>
+          <p class="muted">Drag on the image to draw a crop; drag inside the box to move it.</p>
+          <div class="chips" role="radiogroup" aria-label="Crop shape">
+            <button type="button" class="chip" role="radio" data-aspect="free" aria-checked="true">Free</button>
+            <button type="button" class="chip" role="radio" data-aspect="1:1" aria-checked="false">1:1</button>
+            <button type="button" class="chip" role="radio" data-aspect="4:5" aria-checked="false">4:5</button>
+            <button type="button" class="chip" role="radio" data-aspect="3:2" aria-checked="false">3:2</button>
+            <button type="button" class="chip" role="radio" data-aspect="16:9" aria-checked="false">16:9</button>
+            <button type="button" class="chip" role="radio" data-aspect="9:16" aria-checked="false">9:16</button>
+          </div>
+          <button id="edit-crop-apply" class="generate" type="button">Apply crop</button>
+          <div class="edit-grid-2">
+            <button id="edit-rotate-left" class="ghost" type="button">↺ Rotate left</button>
+            <button id="edit-rotate-right" class="ghost" type="button">↻ Rotate right</button>
+            <button id="edit-flip-h" class="ghost" type="button">⇋ Flip</button>
+            <button id="edit-flip-v" class="ghost" type="button">⇵ Flip vertical</button>
+          </div>
+        </div>
+
+        <div data-panel="adjust" hidden>
+          <label class="strength">Brightness <input data-adjust="brightness" data-neutral="1" type="range" min="0.5" max="1.5" step="0.01" value="1"></label>
+          <label class="strength">Contrast <input data-adjust="contrast" data-neutral="1" type="range" min="0.5" max="1.6" step="0.01" value="1"></label>
+          <label class="strength">Saturation <input data-adjust="saturation" data-neutral="1" type="range" min="0" max="2" step="0.01" value="1"></label>
+          <label class="strength">Warmth <input data-adjust="warmth" data-neutral="0" type="range" min="-0.6" max="0.6" step="0.01" value="0"></label>
+          <div class="edit-grid-2">
+            <button id="edit-adjust-reset" class="ghost" type="button">Reset</button>
+            <button id="edit-adjust-apply" class="generate" type="button">Apply</button>
+          </div>
+        </div>
+
+        <div data-panel="filters" hidden>
+          <p class="muted">Pick a look to preview it, then apply.</p>
+          <div id="edit-filter-grid" class="chips edit-filters" role="radiogroup" aria-label="Filters"></div>
+          <button id="edit-filter-apply" class="generate" type="button">Apply filter</button>
+        </div>
+
+        <p class="muted note edit-note">AI steps (Fix, Restyle, Upscale) are saved to the Gallery automatically. Crops, adjustments and filters are drafts (•) until you press 💾 Save.</p>
+      </aside>
+    </div>
+  </section>
+
   <section id="gallery-view" class="gallery-section" aria-label="Gallery" hidden>
     <div class="gallery-toolbar glass">
       <input id="gallery-search" type="search" placeholder="Search prompts…" aria-label="Search prompts" autocomplete="off">
@@ -139,7 +257,7 @@
           <button id="lb-reuse" type="button">Reuse</button>
           <button id="lb-vary" type="button">Vary</button>
           <button id="lb-upscale" class="wide" type="button">🔍 Upscale ×2</button>
-          <button id="lb-edit" class="wide" type="button">🎨 Edit this image</button>
+          <button id="lb-edit" class="wide accent" type="button">✏️ Open in Edit</button>
           <button id="lb-fix" class="wide" type="button" hidden>🖌️ Fix part of this image</button>
           <a id="lb-download" class="button" href="#" download>Download</a>
           <button id="lb-delete" class="danger" type="button">Delete</button>
