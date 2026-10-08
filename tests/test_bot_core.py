@@ -329,3 +329,20 @@ def test_missing_image_reported(tmp_path) -> None:
     chat = FakeChat()
     asyncio.run(make_bot(tmp_path, runner).handle_text(USER, "a cat", chat))
     assert chat.kinds() == ["send_text", "edit_text"] and "couldn't be found" in chat.calls[1][2]
+
+
+def test_deleted_model_falls_back_to_default(tmp_path, make_png) -> None:
+    seen: list = []
+    chat = FakeChat()
+    bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path), ckpts=(DREAM, SD15))  # SDXL file deleted
+    bot.model_key = "sdxl"
+
+    async def scenario():
+        await bot.handle_text(USER, "/model", chat)
+        await bot.handle_text(USER, "a cat", chat)
+
+    asyncio.run(scenario())
+    menu = chat.calls[0][3]
+    assert button_data(menu) == ["model:dreamshaper", "model:sd15"]  # menu still works
+    assert bot.model_key is None and "switched to" in chat.texts()[1]
+    assert seen[0].model == DREAM  # the prompt still ran, on the default model

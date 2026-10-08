@@ -20,6 +20,8 @@ def resolve_profile(key: str | None, available: list[ModelProfile]) -> ModelProf
     if not key:
         return default_profile(available)
     profile = profile_by_key(key)
+    if not available:
+        raise InvalidParamsError("ComfyUI isn't reachable right now, or none of Studio's models are installed.")
     if profile is None or profile not in available:
         name = profile.label if profile else key
         raise InvalidParamsError(f"{name} isn't installed in ComfyUI.")

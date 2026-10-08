@@ -30,7 +30,7 @@ class ModelCatalog:
             names = await self._fetch()
         except (ComfyUIError, httpx.HTTPError, KeyError, ValueError) as exc:
             log.debug("Could not list checkpoints: %s", exc)
-            names = []
+            return []  # not cached: ask again as soon as ComfyUI is back
         self._cached = available_profiles(names)
         self._fetched_at = time.monotonic()
         return self._cached

@@ -22,7 +22,7 @@ const lb = {
 };
 const state = {
   images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
-  models: [], model: null, style: "none", count: 1,
+  models: [], model: null, modelSignature: "", style: "none", count: 1,
 };
 const MAX_BATCH_SIDE = 768;
 const UPSCALE_MAX_SIDE = 768;
@@ -69,18 +69,24 @@ function syncShapes() {
 const modelByKey = (key) => state.models.find((model) => model.key === key);
 const modelByCkpt = (ckpt) => state.models.find((model) => model.ckpt === ckpt);
 
+// Called at start and on every status tick: picks up ComfyUI coming online and models being added or removed.
 async function loadModels() {
+  let data;
   try {
-    const data = await api("/api/models");
-    state.models = data.models;
-    renderStyles(data.styles);
-    const options = data.models.filter((model) => model.available).map((model) => new Option(model.label, model.key));
-    if (!options.length) return;
-    els.model.replaceChildren(...options);
-    selectModel(data.default ?? options[0].value, { applyDefaults: true });
+    data = await api("/api/models");
   } catch {
-    // ComfyUI offline: checkStatus retries once it is back
+    return; // Studio server unreachable; the next status tick retries
   }
+  if (!els.styles.children.length) renderStyles(data.styles);
+  const available = data.models.filter((model) => model.available);
+  const signature = available.map((model) => model.key).join(",");
+  if (!available.length || signature === state.modelSignature) return;
+  state.models = data.models;
+  state.modelSignature = signature;
+  els.model.replaceChildren(...available.map((model) => new Option(model.label, model.key)));
+  const keep = state.model && available.some((model) => model.key === state.model.key);
+  if (keep) selectModel(state.model.key, { keepSize: true });
+  else selectModel(data.default ?? available[0].key, { applyDefaults: true });
 }
 
 function selectModel(key, { applyDefaults = false, keepSize = false } = {}) {
@@ -533,7 +539,7 @@ async function checkStatus() {
   els.statusText.textContent = online ? "ComfyUI connected" : "ComfyUI offline";
   els.banner.hidden = online;
   if (online && state.galleryUnavailable) loadGallery(true);
-  if (online && !state.models.length) loadModels();
+  if (online) loadModels();
 }
 
 // --- wiring ----------------------------------------------------------------

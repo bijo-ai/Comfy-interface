@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError
-from models import SD15_SHAPES, ModelProfile, check_limits, profile_for_ckpt
+from models import SD15_SHAPES, ModelProfile, check_limits, default_profile, profile_for_ckpt
 from styles import STYLES, style_by_key
 from web.builders import FALLBACK_LIMITS, UPSCALE_MAX_SIDE, build_generation, build_upscale, resolve_profile
 from web.jobs import BusyError, JobManager, JobRequest, UpscaleRequest
@@ -167,7 +167,10 @@ class StudioBot:
 
     async def _model_menu(self, chat: Chat) -> None:
         available = await self.catalog.available()
-        current = resolve_profile(self.model_key, available) if available else None
+        try:
+            current = resolve_profile(self.model_key, available) if available else None
+        except InvalidParamsError:  # the chosen model was removed from ComfyUI
+            current = default_profile(available)
         rows = [[(("✓ " if p == current else "") + p.label, f"model:{p.key}")] for p in available]
         await chat.send_text("Choose a model:" if rows else "ComfyUI isn't reachable right now.", rows or None)
 
@@ -199,6 +202,18 @@ class StudioBot:
     async def _generate(self, shape: str, prompt: str, chat: Chat) -> None:
         try:
             profile = await self._profile()
+        except InvalidParamsError as exc:
+            if self.model_key is None:
+                await chat.send_text(f"⚠️ {exc}")
+                return
+            self.model_key = None  # the chosen model was removed: fall back instead of getting stuck
+            try:
+                profile = await self._profile()
+            except InvalidParamsError as again:
+                await chat.send_text(f"⚠️ {again}")
+                return
+            await chat.send_text(f"⚠️ {exc} I switched to {profile.label if profile else 'the default model'}.")
+        try:
             width, height = (profile.shapes if profile else SD15_SHAPES)[shape]
             params = build_generation(
                 prompt=prompt, negative_prompt=DEFAULT_NEGATIVE, width=width, height=height,
