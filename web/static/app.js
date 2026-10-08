@@ -11,6 +11,8 @@ const els = {
   stageImg: $("#stage-img"), stageEmpty: $("#stage-empty"), stageCaption: $("#stage-caption"),
   live: $("#stage-live"), liveCanvas: $("#stage-canvas"), stageGrid: $("#stage-grid"),
   model: $("#model"), modelNote: $("#model-note"), styles: $("#styles"), counts: [...document.querySelectorAll(".count")],
+  source: $("#source"), sourcePick: $("#source-pick"), sourceFile: $("#source-file"), sourceThumb: $("#source-thumb"),
+  sourceSize: $("#source-size"), sourceClear: $("#source-clear"), strength: $("#strength"), strengthValue: $("#strength-value"),
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
 };
@@ -18,11 +20,11 @@ const lb = {
   dialog: $("#lightbox"), img: $("#lb-img"), prompt: $("#lb-prompt"), negative: $("#lb-negative"), meta: $("#lb-meta"),
   nometa: $("#lb-nometa"), reuse: $("#lb-reuse"), vary: $("#lb-vary"), download: $("#lb-download"),
   remove: $("#lb-delete"), confirm: $("#lb-confirm"), confirmYes: $("#lb-confirm-yes"), confirmNo: $("#lb-confirm-no"),
-  prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"), upscale: $("#lb-upscale"),
+  prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"), upscale: $("#lb-upscale"), edit: $("#lb-edit"),
 };
 const state = {
   images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
-  models: [], model: null, modelSignature: "", style: "none", count: 1,
+  models: [], model: null, modelSignature: "", style: "none", count: 1, source: null,
 };
 const MAX_BATCH_SIDE = 768;
 const UPSCALE_MAX_SIDE = 768;
@@ -109,6 +111,7 @@ function selectModel(key, { applyDefaults = false, keepSize = false } = {}) {
   }
   if (keepSize) syncShapes();
   else setShape(shape);
+  if (state.source) setSource(state.source); // refresh the "made at" size for the new model
 }
 
 function setShape(name) {
@@ -140,9 +143,63 @@ function setCount(count) {
   for (const button of els.counts) button.setAttribute("aria-checked", String(Number(button.dataset.count) === count));
 }
 
+// --- start image (image-to-image) ---------------------------------------------
+
+const IMG2IMG_MAX_SIDE = { sd15: 768, sdxl: 1024 };
+
+function fitSize(width, height, maxSide, minSide = 512) {
+  const longSide = Math.max(width, height);
+  const scale = Math.min(Math.max(longSide, minSide), maxSide) / longSide;
+  return [Math.floor(Math.round(width * scale) / 8) * 8, Math.floor(Math.round(height * scale) / 8) * 8];
+}
+
+function sourceSize() {
+  if (!state.source) return null;
+  return fitSize(state.source.width, state.source.height, IMG2IMG_MAX_SIDE[state.model?.family ?? "sd15"]);
+}
+
+function strengthLabel(value) {
+  return value < 0.4 ? "Subtle" : value < 0.7 ? "Balanced" : "Strong";
+}
+
+function setSource(source) {
+  state.source = source;
+  els.source.hidden = false;
+  els.sourcePick.hidden = true;
+  els.sourceThumb.src = source.url;
+  const [width, height] = sourceSize();
+  els.sourceSize.textContent = `Made at ${width}×${height}`;
+  for (const button of els.shapes) button.disabled = true; // the start image sets the shape
+  syncCount();
+}
+
+function clearSource() {
+  state.source = null;
+  els.source.hidden = true;
+  els.sourcePick.hidden = false;
+  els.sourceFile.value = "";
+  for (const button of els.shapes) button.disabled = false;
+  syncCount();
+}
+
+async function uploadSource(file) {
+  if (!file?.type.startsWith("image/")) {
+    toast("That file isn't an image.", "error");
+    return;
+  }
+  try {
+    const data = await api("/api/sources", { method: "POST", headers: { "Content-Type": file.type }, body: file });
+    setSource({ id: data.id, width: data.width, height: data.height, url: `/api/sources/${data.id}` });
+    els.prompt.focus();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function syncCount() {
   const model = state.model;
-  const tooBig = Math.max(Number(els.width.value), Number(els.height.value)) > MAX_BATCH_SIDE;
+  const [checkWidth, checkHeight] = sourceSize() ?? [Number(els.width.value), Number(els.height.value)];
+  const tooBig = Math.max(checkWidth, checkHeight) > MAX_BATCH_SIDE;
   const singleOnly = model && model.max_batch < 4;
   const four = els.counts.find((button) => button.dataset.count === "4");
   four.disabled = Boolean(singleOnly || tooBig);
@@ -169,6 +226,18 @@ function readParams() {
     model: state.model?.key ?? null,
     style: state.style,
     batch: state.count,
+    ...sourceFields(),
+  };
+}
+
+function sourceFields() {
+  if (!state.source) return {};
+  const [width, height] = sourceSize(); // the server fits the image the same way; used for the live preview
+  return {
+    width,
+    height,
+    strength: Number(els.strength.value),
+    ...(state.source.id ? { source_id: state.source.id } : { source_name: state.source.name }),
   };
 }
 
@@ -586,6 +655,35 @@ lb.vary.addEventListener("click", () => {
   lb.dialog.close();
   window.scrollTo({ top: 0, behavior: "smooth" });
   generate(readParams());
+});
+lb.edit.addEventListener("click", () => {
+  const image = currentImage();
+  setSource({ name: image.name, width: image.width, height: image.height, url: imageUrl(image.name) });
+  if (!els.prompt.value.trim() && image.params) els.prompt.value = image.params.prompt;
+  lb.dialog.close();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  els.prompt.focus();
+});
+els.sourcePick.addEventListener("click", () => els.sourceFile.click());
+els.sourceFile.addEventListener("change", () => uploadSource(els.sourceFile.files[0]));
+els.sourceClear.addEventListener("click", clearSource);
+els.strength.addEventListener("input", () => { els.strengthValue.textContent = strengthLabel(Number(els.strength.value)); });
+els.form.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  els.form.classList.add("dragging");
+});
+els.form.addEventListener("dragleave", () => els.form.classList.remove("dragging"));
+els.form.addEventListener("drop", (event) => {
+  event.preventDefault();
+  els.form.classList.remove("dragging");
+  uploadSource(event.dataTransfer.files[0]);
+});
+document.addEventListener("paste", (event) => {
+  const file = [...event.clipboardData.files].find((item) => item.type.startsWith("image/"));
+  if (file) {
+    event.preventDefault();
+    uploadSource(file);
+  }
 });
 lb.upscale.addEventListener("click", () => {
   const image = currentImage();

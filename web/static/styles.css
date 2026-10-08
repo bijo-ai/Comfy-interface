@@ -66,6 +66,17 @@ select {
 }
 select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .hint { margin: 0; font-size: 13px; color: var(--accent); }
+.source-pick { text-align: left; border-style: dashed; }
+.source { display: flex; gap: 12px; align-items: center; padding: 10px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--field); }
+.source img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; flex: none; }
+.source-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 13px; }
+.source-info .label { margin: 0; }
+.strength { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; margin-top: 4px; color: var(--muted); }
+.strength input { grid-column: 1 / -1; width: 100%; padding: 0; accent-color: var(--accent); border: 0; background: none; box-shadow: none; }
+.strength span { grid-row: 1; grid-column: 2; color: var(--text); }
+.source-clear { align-self: flex-start; padding: 4px 10px; }
+.composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.shape:disabled { opacity: .35; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
   padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--field);
