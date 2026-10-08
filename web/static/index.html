@@ -1,1 +1,103 @@
-<!doctype html><title>ComfyUI Studio</title>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ComfyUI Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23f2b544'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23151518'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span>ComfyUI <span>Studio</span></div>
+    <div id="status" class="status" data-state="checking" role="status">
+      <span class="dot" aria-hidden="true"></span><span class="status-text">Checking ComfyUI…</span>
+    </div>
+  </header>
+
+  <div id="offline-banner" class="banner" hidden>
+    ComfyUI isn't reachable. Start the ComfyUI app and this page will reconnect on its own.
+  </div>
+
+  <main class="layout">
+    <form id="composer" class="composer panel" autocomplete="off" novalidate>
+      <label class="label" for="prompt">Prompt</label>
+      <textarea id="prompt" rows="4" placeholder="A red fox in a snowy forest, golden hour, photo"></textarea>
+
+      <span class="label" id="shape-label">Shape</span>
+      <div class="shapes" role="radiogroup" aria-labelledby="shape-label">
+        <button type="button" class="shape" role="radio" data-w="512" data-h="512" aria-checked="true"><span class="shape-icon" style="--w:14px;--h:14px"></span>Square</button>
+        <button type="button" class="shape" role="radio" data-w="512" data-h="768" aria-checked="false"><span class="shape-icon" style="--w:11px;--h:16px"></span>Portrait</button>
+        <button type="button" class="shape" role="radio" data-w="768" data-h="512" aria-checked="false"><span class="shape-icon" style="--w:16px;--h:11px"></span>Landscape</button>
+      </div>
+
+      <details class="advanced" id="advanced">
+        <summary>Advanced</summary>
+        <div class="adv-grid">
+          <label class="wide">Negative prompt<textarea id="negative" rows="2"></textarea></label>
+          <label>Width<input id="width" type="number" min="64" max="2048" step="8" value="512"></label>
+          <label>Height<input id="height" type="number" min="64" max="2048" step="8" value="512"></label>
+          <label>Steps<input id="steps" type="number" min="1" max="150" value="20"></label>
+          <label>CFG<input id="cfg" type="number" min="1" max="30" step="0.5" value="8"></label>
+          <label class="wide">Seed<input id="seed" type="number" min="0" placeholder="Random"></label>
+        </div>
+      </details>
+
+      <button id="generate" class="generate" type="submit">
+        <span class="generate-fill" aria-hidden="true"></span>
+        <span class="generate-label">Generate</span>
+        <kbd aria-hidden="true">Ctrl ↵</kbd>
+      </button>
+    </form>
+
+    <section class="stage panel" aria-live="polite" aria-label="Latest image">
+      <p id="stage-empty" class="stage-empty">Your images will appear here.</p>
+      <img id="stage-img" alt="" hidden>
+      <p id="stage-caption" class="stage-caption"></p>
+    </section>
+  </main>
+
+  <section class="gallery-section" aria-labelledby="gallery-title">
+    <div class="gallery-head">
+      <h2 id="gallery-title">Gallery</h2>
+      <span id="gallery-count" class="muted"></span>
+    </div>
+    <div id="gallery" class="gallery"></div>
+    <p id="gallery-empty" class="muted gallery-empty" hidden></p>
+    <button id="load-more" class="ghost load-more" type="button" hidden>Load more</button>
+  </section>
+
+  <dialog id="lightbox" class="lightbox" aria-label="Image details">
+    <div class="lb-body">
+      <div class="lb-media">
+        <img id="lb-img" alt="">
+        <button id="lb-prev" class="lb-nav prev" type="button" aria-label="Previous image">‹</button>
+        <button id="lb-next" class="lb-nav next" type="button" aria-label="Next image">›</button>
+      </div>
+      <aside class="lb-info">
+        <button id="lb-close" class="lb-close ghost" type="button" aria-label="Close">✕</button>
+        <h3>Prompt</h3>
+        <p id="lb-prompt" class="lb-prompt"></p>
+        <h3>Negative</h3>
+        <p id="lb-negative" class="muted"></p>
+        <dl id="lb-meta" class="lb-meta"></dl>
+        <p id="lb-nometa" class="muted note" hidden>Settings unavailable: this image was made with a different workflow.</p>
+        <div class="lb-actions">
+          <button id="lb-reuse" type="button">Reuse</button>
+          <button id="lb-vary" type="button">Vary</button>
+          <a id="lb-download" class="button" href="#" download>Download</a>
+          <button id="lb-delete" class="danger" type="button">Delete</button>
+        </div>
+        <div id="lb-confirm" class="lb-confirm" hidden>
+          <span>Delete this image from disk?</span>
+          <button id="lb-confirm-no" class="ghost" type="button">Cancel</button>
+          <button id="lb-confirm-yes" class="danger solid" type="button">Delete</button>
+        </div>
+      </aside>
+    </div>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+</body>
+</html>
