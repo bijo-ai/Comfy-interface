@@ -64,13 +64,13 @@ Requires [uv](https://docs.astral.sh/uv/) and ComfyUI running at `http://127.0.0
 with the `v1-5-pruned-emaonly.safetensors` checkpoint installed.
 
 ```powershell
-cd C:\Users\appua\comfyui-mcp
+cd C:\path\to\Comfy-interface
 uv sync                      # creates .venv with Python 3.12 + dependencies
 copy .env.example .env       # then edit if needed
 uv run python test_generate.py
 ```
 
-> On this machine AVG's HTTPS scanning can break package downloads. If `uv sync` fails with a
+> Antivirus HTTPS scanning (e.g. AVG/Avast) can break package downloads. If `uv sync` fails with a
 > certificate error, run `$env:UV_NATIVE_TLS=1; uv sync` so uv uses the Windows certificate store.
 
 ### `.env`
@@ -124,7 +124,7 @@ uv run python check_mcp.py http http://127.0.0.1:8000/mcp --call   # against a r
 ```
 
 You can also use the MCP Inspector (needs Node.js):
-`npx @modelcontextprotocol/inspector C:\Users\appua\comfyui-mcp\.venv\Scripts\python.exe C:\Users\appua\comfyui-mcp\server.py`
+`npx @modelcontextprotocol/inspector C:\path\to\Comfy-interface\.venv\Scripts\python.exe C:\path\to\Comfy-interface\server.py`
 
 ## LM Studio configuration
 
@@ -139,8 +139,8 @@ even when `uv` isn't on LM Studio's PATH.
 {
   "mcpServers": {
     "comfyui": {
-      "command": "C:\\Users\\appua\\comfyui-mcp\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\appua\\comfyui-mcp\\server.py"]
+      "command": "C:\\path\\to\\Comfy-interface\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\Comfy-interface\\server.py"]
     }
   }
 }
