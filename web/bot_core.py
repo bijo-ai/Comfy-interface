@@ -17,8 +17,17 @@ from typing import Any, Protocol
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError
 from models import SD15_SHAPES, ModelProfile, check_limits, default_profile, profile_for_ckpt
 from styles import STYLES, style_by_key
-from web.builders import FALLBACK_LIMITS, UPSCALE_MAX_SIDE, build_generation, build_upscale, resolve_profile
-from web.jobs import BusyError, JobManager, JobRequest, UpscaleRequest
+from web.builders import (
+    DEFAULT_STRENGTH,
+    FALLBACK_LIMITS,
+    UPSCALE_MAX_SIDE,
+    build_generation,
+    build_img2img,
+    build_upscale,
+    resolve_profile,
+)
+from web.jobs import BusyError, Img2ImgRequest, JobManager, JobRequest, UpscaleRequest
+from web.sources import SourceStore
 from web.users import UserStore
 
 log = logging.getLogger(__name__)
@@ -35,7 +44,8 @@ HELP = (
     "• /portrait an old fisherman → tall image\n"
     "• /landscape mountains at dawn → wide image\n"
     "• /model → choose the model\n"
-    "• /style → choose a style\n\n"
+    "• /style → choose a style\n"
+    "• send a photo with a caption (e.g. \"make it winter\") → edit that photo\n\n"
     "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2."
 )
 OWNER_HELP = "\n• /users → see and remove the people you've let in"
@@ -49,6 +59,7 @@ WELCOME = (
     "Images are made on the owner's PC and saved on it too.\n\n" + HELP.replace(" on your PC", "")
 )
 DENIED_NOTICE = "Sorry, the owner didn't approve access to this bot."
+NEED_CAPTION = 'Add a caption to the photo describing the change, e.g. "make it winter" or "as an oil painting".'
 
 
 class Chat(Protocol):
@@ -103,6 +114,8 @@ class Action:
     params: GenerationParams  # settings to reuse (seed is replaced on use)
     image_name: str | None  # gallery image for 🔍 Upscale
     user_id: int  # buttons only work for the person they were sent to
+    source: Path | None = None  # start image when the result came from image-to-image
+    strength: float = 0.0
 
 
 class ActionStore:
@@ -112,9 +125,12 @@ class ActionStore:
         self._items: OrderedDict[str, Action] = OrderedDict()
         self._keep = keep
 
-    def put(self, params: GenerationParams, image_name: str | None, user_id: int) -> str:
+    def put(
+        self, params: GenerationParams, image_name: str | None, user_id: int,
+        source: Path | None = None, strength: float = 0.0,
+    ) -> str:
         token = uuid.uuid4().hex[:16]
-        self._items[token] = Action(params, image_name, user_id)
+        self._items[token] = Action(params, image_name, user_id, source, strength)
         while len(self._items) > self._keep:
             self._items.popitem(last=False)
         return token
@@ -133,7 +149,9 @@ class StudioBot:
         catalog: Catalog,
         users: UserStore,
         chat_for: Callable[[int], Chat] | None = None,
+        sources: SourceStore | None = None,
     ) -> None:
+        self.sources = sources  # where Telegram photos are kept for image-to-image
         self.jobs = jobs
         self.galleries = galleries
         self.owner_id = owner_id
@@ -169,6 +187,36 @@ class StudioBot:
             else:
                 await self._generate(shape, prompt, prefs, user_id, chat)
 
+    async def handle_photo(self, user_id: int, data: bytes, caption: str, chat: Chat, who: str = "") -> None:
+        """A photo with a caption: repaint the photo following the caption (image-to-image)."""
+        if not await self._admitted(user_id, who, chat):
+            return
+        if not caption.strip():
+            await chat.send_text(NEED_CAPTION)
+            return
+        if self.sources is None:
+            await chat.send_text("⚠️ Photo editing isn't set up on this bot.")
+            return
+        prefs = self.prefs_for(user_id)
+        try:
+            source = self.sources.path(self.sources.save(data))
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        found, profile = await self._current_profile(prefs, chat)
+        if not found:
+            return
+        try:
+            request = build_img2img(
+                source=source, prompt=caption.strip(), negative_prompt=DEFAULT_NEGATIVE,
+                steps=profile.steps if profile else 20, cfg=profile.cfg if profile else 8.0,
+                seed=None, batch=1, style=prefs.style_key, strength=DEFAULT_STRENGTH, profile=profile,
+            )
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
+
     async def handle_button(self, user_id: int, data: str, chat: Chat, who: str = "") -> None:
         if not await self._admitted(user_id, who, chat):
             return
@@ -185,9 +233,9 @@ class StudioBot:
             if action is None:
                 await chat.send_text(EXPIRED)
             elif kind == "vary":
-                await self._run(replace(action.params, seed=None, batch=1), chat, user_id)
+                await self._run(self._again(action, batch=1), chat, user_id)
             elif kind == "x4":
-                await self._four_more(action.params, chat, user_id)
+                await self._four_more(action, chat, user_id)
             else:
                 await self._upscale(action, chat, user_id)
 
@@ -292,20 +340,27 @@ class StudioBot:
 
     # --- jobs ----------------------------------------------------------------
 
-    async def _generate(self, shape: str, prompt: str, prefs: Prefs, user_id: int, chat: Chat) -> None:
+    async def _current_profile(self, prefs: Prefs, chat: Chat) -> tuple[bool, ModelProfile | None]:
+        """The person's model; if it was removed from ComfyUI, fall back to the default and say so."""
         try:
-            profile = await self._profile(prefs)
+            return True, await self._profile(prefs)
         except InvalidParamsError as exc:
             if prefs.model_key is None:
                 await chat.send_text(f"⚠️ {exc}")
-                return
-            prefs.model_key = None  # the chosen model was removed: fall back instead of getting stuck
+                return False, None
+            prefs.model_key = None  # fall back instead of getting stuck
             try:
                 profile = await self._profile(prefs)
             except InvalidParamsError as again:
                 await chat.send_text(f"⚠️ {again}")
-                return
+                return False, None
             await chat.send_text(f"⚠️ {exc} I switched to {profile.label if profile else 'the default model'}.")
+            return True, profile
+
+    async def _generate(self, shape: str, prompt: str, prefs: Prefs, user_id: int, chat: Chat) -> None:
+        found, profile = await self._current_profile(prefs, chat)
+        if not found:
+            return
         try:
             width, height = (profile.shapes if profile else SD15_SHAPES)[shape]
             params = build_generation(
@@ -318,14 +373,20 @@ class StudioBot:
             return
         await self._run(params, chat, user_id)
 
-    async def _four_more(self, params: GenerationParams, chat: Chat, user_id: int) -> None:
-        params = replace(params, seed=None, batch=4)
+    @staticmethod
+    def _again(action: Action, batch: int) -> GenerationParams | Img2ImgRequest:
+        """The same settings with a new seed: from the same start image if there was one."""
+        params = replace(action.params, seed=None, batch=batch)
+        return Img2ImgRequest(action.source, params, action.strength) if action.source else params
+
+    async def _four_more(self, action: Action, chat: Chat, user_id: int) -> None:
+        params = action.params
         try:
             check_limits(profile_for_ckpt(params.model or "") or FALLBACK_LIMITS, params.width, params.height, 4)
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
-        await self._run(params, chat, user_id)
+        await self._run(self._again(action, batch=4), chat, user_id)
 
     async def _upscale(self, action: Action, chat: Chat, user_id: int) -> None:
         gallery = await self.galleries.get()
@@ -348,7 +409,12 @@ class StudioBot:
         except BusyError:
             await chat.send_text(BUSY)
             return
-        label = "🔍 Upscaling ×2" if isinstance(request, UpscaleRequest) else f"🎨 {self._model_label(request)}"
+        if isinstance(request, UpscaleRequest):
+            label = "🔍 Upscaling ×2"
+        elif isinstance(request, Img2ImgRequest):
+            label = f"🎨 {self._model_label(request.params)} · editing your photo"
+        else:
+            label = f"🎨 {self._model_label(request)}"
         status = await chat.send_text(f"{label}…")
         last_edit = float("-inf")
         async for event in job.stream():
@@ -373,7 +439,8 @@ class StudioBot:
             p = request.params
             await chat.send_document(paths[0], f"🔍 Upscaled ×2 · {p.width * 2}×{p.height * 2} · {event['elapsed']}s")
         else:
-            caption = caption_for(request, event["seed"], event["elapsed"], self._model_label(request))
+            params = request.params if isinstance(request, Img2ImgRequest) else request
+            caption = caption_for(params, event["seed"], event["elapsed"], self._model_label(params))
             if len(paths) > 1:
                 await chat.send_album(paths, caption)
                 await chat.send_text("Upscale your favourite, or make 4 more:", self._picker_buttons(request, images, user_id))
@@ -381,10 +448,16 @@ class StudioBot:
                 await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"], user_id))
         await chat.delete(status)
 
-    def _photo_buttons(self, params: GenerationParams, image_name: str, user_id: int) -> Buttons:
+    def _reuse(self, request: GenerationParams | Img2ImgRequest, image_name: str | None, user_id: int) -> str:
+        if isinstance(request, Img2ImgRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, request.strength)
+        return self.actions.put(request, image_name, user_id)
+
+    def _photo_buttons(self, request: GenerationParams | Img2ImgRequest, image_name: str, user_id: int) -> Buttons:
+        params = request.params if isinstance(request, Img2ImgRequest) else request
         profile = profile_for_ckpt(params.model or "") or FALLBACK_LIMITS
         small = max(params.width, params.height) <= UPSCALE_MAX_SIDE
-        reuse = self.actions.put(params, None, user_id)
+        reuse = self._reuse(request, None, user_id)
         row = [("🔁 Vary", f"vary:{reuse}")]
         if profile.max_batch >= 4 and small:
             row.append(("🖼️ ×4", f"x4:{reuse}"))
@@ -392,11 +465,9 @@ class StudioBot:
             row.append(("🔍 Upscale", f"up:{self.actions.put(params, image_name, user_id)}"))
         return [row]
 
-    def _picker_buttons(self, params: GenerationParams, images: list[dict[str, Any]], user_id: int) -> Buttons:
-        upscale_row = [
-            (f"🔍 {n}", f"up:{self.actions.put(params, image['name'], user_id)}") for n, image in enumerate(images, 1)
-        ]
-        return [upscale_row, [("🖼️ ×4 again", f"x4:{self.actions.put(params, None, user_id)}")]]
+    def _picker_buttons(self, request: GenerationParams | Img2ImgRequest, images: list[dict[str, Any]], user_id: int) -> Buttons:
+        upscale_row = [(f"🔍 {n}", f"up:{self._reuse(request, image['name'], user_id)}") for n, image in enumerate(images, 1)]
+        return [upscale_row, [("🖼️ ×4 again", f"x4:{self._reuse(request, None, user_id)}")]]
 
     @staticmethod
     def _model_label(params: GenerationParams) -> str:

@@ -83,6 +83,19 @@ def build_application(token: str, studio: StudioBot) -> Application:
             return
         await studio.handle_text(user.id, message.text, TelegramChat(context.bot, message.chat_id), who=_who(user))
 
+    async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message, user, chat = update.effective_message, update.effective_user, update.effective_chat
+        if message is None or user is None or not _private(chat):
+            return
+        attachment = message.photo[-1] if message.photo else message.document  # largest photo size, or an image file
+        reply = TelegramChat(context.bot, message.chat_id)
+        try:
+            data = bytes(await (await attachment.get_file()).download_as_bytearray())
+        except TelegramError as exc:  # e.g. files over Telegram's 20 MB bot download limit
+            await reply.send_text(f"⚠️ Couldn't download that image ({exc}).")
+            return
+        await studio.handle_photo(user.id, data, message.caption or "", reply, who=_who(user))
+
     async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query, chat = update.callback_query, update.effective_chat
         if query is None or not query.data or not _private(chat):
@@ -98,6 +111,7 @@ def build_application(token: str, studio: StudioBot) -> Application:
     application = Application.builder().token(token).concurrent_updates(True).build()
     studio.chat_for = lambda user_id: TelegramChat(application.bot, user_id)  # private chat id == user id
     application.add_handler(MessageHandler(filters.TEXT, on_text))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     application.add_handler(CallbackQueryHandler(on_button))
     application.add_error_handler(on_error)
     return application

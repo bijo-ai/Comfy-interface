@@ -10,10 +10,11 @@ from config import _int_or_none
 from models import available_profiles
 from tests.conftest import graph_for
 from web import bot_core
-from web.bot_core import BUSY, EXPIRED, HELP, PENDING, REQUEST_SENT, WELCOME, StudioBot, caption_for, parse_request
+from web.bot_core import BUSY, EXPIRED, HELP, NEED_CAPTION, PENDING, REQUEST_SENT, WELCOME, StudioBot, caption_for, parse_request
 from web.users import UserStore
 from web.gallery import Gallery
-from web.jobs import JobManager, UpscaleRequest
+from web.jobs import Img2ImgRequest, JobManager, UpscaleRequest
+from web.sources import SourceStore
 
 USER = 42
 DREAM = "DreamShaper_8_pruned.safetensors"
@@ -82,6 +83,7 @@ def make_bot(tmp_path: Path, runner, allowed: int | None = USER, ckpts=(DREAM, S
     bot = StudioBot(
         jobs or JobManager(runner), FakeGalleries(gallery), allowed, FakeCatalog(ckpts),
         users=UserStore(tmp_path / "users.json"), chat_for=lambda uid: chats.setdefault(uid, FakeChat()),
+        sources=SourceStore(tmp_path / "sources"),
     )
     bot.test_chats = chats
     return bot
@@ -94,7 +96,10 @@ def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
         seen.append(request)
         for step in range(1, 21):
             on_progress(step, 20)
-        count = 1 if isinstance(request, UpscaleRequest) else request.batch
+        if isinstance(request, UpscaleRequest):
+            count = 1
+        else:
+            count = request.params.batch if isinstance(request, Img2ImgRequest) else request.batch
         names = [f"img{len(seen)}_{i}.png" for i in range(count)]
         if make_png is not None:
             for name in names:
@@ -442,3 +447,69 @@ def test_buttons_are_personal(tmp_path, make_png) -> None:
 
     asyncio.run(scenario())
     assert len(seen) == 1 and friend.texts() == [EXPIRED]
+
+
+# --- image-to-image from Telegram photos ------------------------------------------------------
+
+
+def photo_bytes(size=(1200, 900)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (90, 140, 200)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def test_photo_with_caption_runs_img2img(tmp_path, make_png) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path))
+    chat = FakeChat()
+    asyncio.run(bot.handle_photo(USER, photo_bytes(), "make it winter", chat))
+    request = seen[0]
+    assert isinstance(request, Img2ImgRequest) and request.strength == 0.55
+    assert (request.params.prompt, request.params.model) == ("make it winter", DREAM)
+    assert (request.params.width, request.params.height) == (768, 576)
+    assert request.source.parent == tmp_path / "sources"
+    buttons = chat.last("send_photo")[3]
+    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up"]
+
+
+def test_vary_and_x4_of_img2img_keep_the_start_image(tmp_path, make_png) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen, make_png, tmp_path))
+    chat = FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_bytes(), "as an oil painting", chat)
+        vary, x4, _ = button_data(chat.last("send_photo")[3])
+        await bot.handle_button(USER, vary, chat)
+        await bot.handle_button(USER, x4, chat)
+
+    asyncio.run(scenario())
+    first, varied, four = seen
+    assert all(isinstance(r, Img2ImgRequest) for r in seen)
+    assert varied.source == first.source == four.source
+    assert (varied.params.seed, varied.params.batch, four.params.batch) == (None, 1, 4)
+
+
+def test_photo_without_caption_asks_for_one(tmp_path) -> None:
+    seen: list = []
+    chat = FakeChat()
+    asyncio.run(make_bot(tmp_path, done_runner(seen)).handle_photo(USER, photo_bytes(), "  ", chat))
+    assert seen == [] and chat.texts() == [NEED_CAPTION]
+
+
+def test_photo_that_isnt_an_image(tmp_path) -> None:
+    chat = FakeChat()
+    asyncio.run(make_bot(tmp_path, done_runner([])).handle_photo(USER, b"nope", "make it winter", chat))
+    assert "isn't an image" in chat.texts()[0]
+
+
+def test_stranger_photo_goes_through_approval(tmp_path) -> None:
+    seen: list = []
+    bot = make_bot(tmp_path, done_runner(seen))
+    chat = FakeChat()
+    asyncio.run(bot.handle_photo(FRIEND, photo_bytes(), "make it winter", chat, who="Ann"))
+    assert seen == [] and chat.texts() == [REQUEST_SENT] and not (tmp_path / "sources").exists()

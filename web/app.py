@@ -154,7 +154,8 @@ def create_app(
         bot_runner = None
         if settings.telegram_bot_token:
             studio = StudioBot(
-                jobs, galleries, settings.telegram_allowed_user_id, catalog, UserStore(settings.telegram_users_path)
+                jobs, galleries, settings.telegram_allowed_user_id, catalog,
+                UserStore(settings.telegram_users_path), sources=sources,
             )
             bot_runner = BotRunner(
                 lambda: build_application(settings.telegram_bot_token, studio), on_started=register_commands

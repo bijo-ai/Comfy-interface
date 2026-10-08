@@ -44,6 +44,12 @@ A local website for generating and browsing images without an LLM. Type a prompt
 - **Shapes:** Square, Portrait and Landscape: 512×512 / 512×768 / 768×512, or 1024² / 832×1216 / 1216×832 for SDXL.
   **Advanced** has the negative prompt, width/height, steps, CFG and seed.
 - **×1 / ×4:** make 4 variations at once, shown as a 2×2 grid. Click one to open it.
+- **Image-to-image:** click **📤 Start from an image**, or drop or paste a picture onto the form, or use
+  **🎨 Edit this image** on any gallery image. Then describe the change ("make it winter", "as an oil painting").
+  - **How much to change:** a slider from *Subtle* (0.2) to *Strong* (0.9).
+  - **Size:** the result keeps the picture's shape, resized to fit the model (768 px for SD 1.5 / DreamShaper,
+    1024 px for SDXL), so big phone photos can't overload the GPU.
+  - **Storage:** uploads are kept in `cache/sources/`.
 - **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
   ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
 - **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made
@@ -118,6 +124,7 @@ How it behaves:
 | **🔁 Vary** under an image | same prompt and size, new seed |
 | **🖼️ ×4** under an image | 4 new variations as an album, then **🔍 1–4** buttons to upscale your favourite |
 | **🔍 Upscale** under an image | a 2× larger version, sent as a file so Telegram doesn't compress it |
+| a **photo with a caption** ("make it winter") | that photo repainted following the caption; 🔁 Vary and 🖼️ ×4 keep using the same photo |
 | `/help` | these instructions plus your current model and style |
 
 Sizes follow the chosen model. The GPU limits above apply here too: SDXL images get only 🔁 Vary.

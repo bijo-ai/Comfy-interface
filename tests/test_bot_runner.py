@@ -244,3 +244,35 @@ def test_group_chats_are_ignored() -> None:
     asyncio.run(handler.callback(update("group"), SimpleNamespace(bot=object())))
     asyncio.run(handler.callback(update("private"), SimpleNamespace(bot=object())))
     assert calls == [(42, "a cat", "Ann Lee (@ann)")]
+
+
+def test_photos_are_downloaded_and_passed_on() -> None:
+    from types import SimpleNamespace
+
+    from telegram.ext import MessageHandler
+
+    from web.bot import build_application
+
+    calls: list = []
+
+    class Studio(FakeStudio):
+        async def handle_photo(self, user_id, data, caption, chat, who="") -> None:
+            calls.append((user_id, data, caption))
+
+    class FakeFile:
+        async def download_as_bytearray(self):
+            return bytearray(b"jpeg-bytes")
+
+    class FakePhotoSize:
+        async def get_file(self):
+            return FakeFile()
+
+    application = build_application("123:abc", Studio())
+    photo_handler = [h for h in application.handlers[0] if isinstance(h, MessageHandler)][1]
+    message = SimpleNamespace(text=None, caption="make it winter", chat_id=7, photo=[object(), FakePhotoSize()], document=None)
+    update = SimpleNamespace(
+        effective_message=message, effective_user=SimpleNamespace(id=42, full_name="Ann", username=None),
+        effective_chat=SimpleNamespace(id=7, type="private"),
+    )
+    asyncio.run(photo_handler.callback(update, SimpleNamespace(bot=object())))
+    assert calls == [(42, b"jpeg-bytes", "make it winter")]
