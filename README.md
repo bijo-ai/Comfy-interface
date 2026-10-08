@@ -24,7 +24,9 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `test_generate.py` | End-to-end test of the generation logic (no MCP) |
 | `check_mcp.py` | Minimal MCP client: lists tools and optionally calls `generate_image` |
 | `web/` | **ComfyUI Studio** web app: `app.py` (FastAPI routes), `jobs.py` (live progress), `gallery.py` (output folder), `static/` (the page) |
-| `run_web.bat` | Double-click to start the web app |
+| `start_studio.bat` | One-click launcher: starts ComfyUI if needed, then the web app |
+| `run_web.bat` | Starts only the web app |
+| `assets/studio.ico` | App icon for a Desktop shortcut |
 | `tests/` | pytest suite for the client, gallery, jobs and web API |
 
 ## Web app: ComfyUI Studio
@@ -44,7 +46,13 @@ A local website for generating and browsing images without an LLM. Type a prompt
   - ←/→ move between images and Esc closes.
 - **Status:** a ComfyUI connected/offline indicator. The page reconnects by itself when ComfyUI starts.
 
-**Start it:** double-click `run_web.bat`, or run
+**Start it:** double-click **`start_studio.bat`**. It starts Comfy Desktop if it isn't running, waits until
+ComfyUI is ready, then starts the site and opens your browser. If the site is already running, it just
+opens the page. For a Desktop icon, right-click `start_studio.bat` → *Send to* → *Desktop (create shortcut)*,
+then use `assets/studio.ico` as its icon. If Comfy Desktop is installed somewhere else, set the
+`COMFY_DESKTOP_EXE` environment variable to its `.exe`.
+
+`run_web.bat` starts only the site, if ComfyUI is already running. Or run it yourself:
 
 ```powershell
 uv run python -m web                 # opens http://127.0.0.1:7860 in your browser
