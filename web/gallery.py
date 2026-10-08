@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 from comfy_client import WorkflowError, find_single_node, identify_nodes, linked_node
 
@@ -17,7 +19,10 @@ log = logging.getLogger(__name__)
 
 THUMB_WIDTH = 320
 KINDS = ("generated", "edited", "fixed", "upscaled")
-_KIND_PREFIXES = (("ComfyUI_img2img", "edited"), ("ComfyUI_inpaint", "fixed"), ("ComfyUI_upscaled", "upscaled"))
+_KIND_PREFIXES = (
+    ("ComfyUI_img2img", "edited"), ("LUMOS_edit", "edited"), ("ComfyUI_inpaint", "fixed"), ("ComfyUI_upscaled", "upscaled"),
+)
+EDIT_PREFIX = "LUMOS_edit_"
 
 
 def image_kind(name: str) -> str:
@@ -157,6 +162,20 @@ class Gallery:
                 img.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 4))
                 img.convert("RGB").save(thumb, "WEBP", quality=80)
         return thumb
+
+    def save_edit(self, source: Path, parent: str | None = None) -> GalleryImage:
+        """Store an Edit-studio draft as the next LUMOS_edit_NNNNN_.png, carrying the parent's settings."""
+        info = PngInfo()
+        if parent is not None:
+            with Image.open(self._existing(parent)) as original:
+                prompt = original.info.get("prompt")
+            if isinstance(prompt, str):
+                info.add_text("prompt", prompt)
+        numbers = [int(m.group(1)) for p in self.output_dir.glob(f"{EDIT_PREFIX}*.png") if (m := re.search(r"_(\d+)_\.png$", p.name))]
+        name = f"{EDIT_PREFIX}{max(numbers, default=0) + 1:05d}_.png"
+        with Image.open(source) as img:
+            img.convert("RGB").save(self.output_dir / name, format="PNG", pnginfo=info)
+        return self.get(name)
 
     def delete(self, name: str) -> None:
         path = self._existing(name)

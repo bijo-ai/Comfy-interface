@@ -434,3 +434,50 @@ def test_images_endpoint_filters(client, settings, make_png) -> None:
     assert client.get("/api/images?kind=bogus").status_code == 422
     counts = client.get("/api/images/counts").json()
     assert counts == {"all": 2, "generated": 1, "edited": 0, "fixed": 1, "upscaled": 0}
+
+
+# --- Edit studio: saving drafts, upscaling drafts ----------------------------------------------
+
+def _png_bytes(size=(512, 512), color=(10, 120, 200)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_save_draft_into_gallery_keeps_parent_settings(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "ComfyUI_00001_.png", graph_for(_Params(prompt="a red fox", seed=5)))
+    with TestClient(recording_app(settings, []), base_url=BASE_URL) as client:
+        draft = _upload(client, _png_bytes((400, 400)))
+        first = client.post("/api/save", json={"source_id": draft, "parent_name": "ComfyUI_00001_.png"})
+        assert first.status_code == 200
+        second = client.post("/api/save", json={"source_id": _upload(client, _png_bytes())}).json()
+        listed = client.get("/api/images?kind=edited").json()
+        found = client.get("/api/images?q=red fox").json()["total"]
+        bad = client.post("/api/save", json={"source_id": "not-an-id"})
+        gone = client.post("/api/save", json={"source_id": draft, "parent_name": "nope.png"})
+    saved = first.json()
+    assert saved["name"] == "LUMOS_edit_00001_.png" and saved["kind"] == "edited"
+    assert (saved["width"], saved["height"]) == (400, 400) and saved["params"]["prompt"] == "a red fox"
+    assert second["name"] == "LUMOS_edit_00002_.png" and second["params"] is None
+    assert listed["total"] == 2 and found == 2  # the saved edit is searchable by its original prompt
+    assert bad.status_code == 400 and gone.status_code == 404
+
+
+def test_upscale_from_draft(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "ComfyUI_00001_.png", graph_for(_Params(prompt="a red fox", seed=5)))
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        small = _upload(client, _png_bytes((512, 384)))
+        big = _upload(client, _png_bytes((1024, 1024)))
+        ok = client.post("/api/upscale", json={"source_id": small, "parent_name": "ComfyUI_00001_.png"})
+        sse_events(client, ok.json()["job_id"])
+        refused = client.post("/api/upscale", json={"source_id": big})
+        neither = client.post("/api/upscale", json={})
+    request = seen[0]
+    assert (request.params.width, request.params.height, request.params.prompt) == (512, 384, "a red fox")
+    assert refused.status_code == 422 and "already large" in refused.json()["error"]
+    assert neither.status_code == 422

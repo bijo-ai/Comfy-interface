@@ -44,7 +44,7 @@ from web.builders import (
     resolve_profile,
 )
 from web.catalog import ModelCatalog
-from web.gallery import KINDS, Gallery
+from web.gallery import KINDS, Gallery, GalleryImage
 from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, Runner, UpscaleRequest
 from web.sources import SourceStore
 from web.users import UserStore
@@ -77,7 +77,14 @@ class GenerateRequest(BaseModel):
 
 
 class UpscaleBody(BaseModel):
-    name: str
+    name: str | None = None  # a gallery image...
+    source_id: str | None = None  # ...or an Edit-studio draft
+    parent_name: str | None = None  # gallery image a draft came from (for its prompt and seed)
+
+
+class SaveBody(BaseModel):
+    source_id: str  # Edit-studio draft to keep
+    parent_name: str | None = None  # gallery image it was edited from
 
 
 class InpaintBody(BaseModel):
@@ -277,6 +284,13 @@ def create_app(
             width, height = img.size
         return {"id": source_id, "width": width, "height": height}
 
+    @app.post("/api/save")
+    async def save_draft(body: SaveBody) -> dict[str, Any]:
+        gallery = await require_gallery()
+        with image_errors():
+            saved = gallery.save_edit(sources.path(body.source_id), body.parent_name)
+        return saved.to_json()
+
     @app.get("/api/sources/{source_id}")
     async def get_source(source_id: str) -> FileResponse:
         with image_errors():
@@ -294,9 +308,17 @@ def create_app(
     async def start_upscale(body: UpscaleBody) -> dict[str, str]:
         gallery = await require_gallery()
         with image_errors():
-            image = gallery.get(body.name)
+            if body.name:
+                image, path = gallery.get(body.name), gallery.path(body.name)
+            elif body.source_id:
+                path = sources.path(body.source_id)
+                parent = gallery.get(body.parent_name) if body.parent_name else None
+                with Image.open(path) as img:
+                    image = GalleryImage(body.source_id, 0.0, img.width, img.height, parent.params if parent else None)
+            else:
+                raise ApiError(422, "Choose the image to upscale.")
         try:
-            request = build_upscale(image, gallery.path(body.name), await catalog.available())
+            request = build_upscale(image, path, await catalog.available())
         except InvalidParamsError as exc:
             raise ApiError(422, str(exc)) from exc
         return start_job(request)
