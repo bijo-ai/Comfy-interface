@@ -95,3 +95,60 @@ def test_app_starts_bot_only_with_token(settings, monkeypatch) -> None:
     with TestClient(app_module.create_app(replace(settings, telegram_bot_token="1:x")), base_url="http://127.0.0.1"):
         assert events == ["created", "start"]
     assert events == ["created", "start", "stop"]
+
+
+class FakeStudio:
+    def __init__(self) -> None:
+        self.vary_calls: list[tuple] = []
+
+    async def handle_text(self, user_id, text, chat) -> None: ...
+
+    async def handle_vary(self, user_id, token, chat) -> None:
+        self.vary_calls.append((user_id, token, chat._chat_id))
+
+
+def test_updates_are_handled_concurrently() -> None:
+    from web.bot import build_application
+
+    # A long generation must not hold up other updates (Busy replies, Vary button answers).
+    assert build_application("123:abc", FakeStudio()).concurrent_updates > 1
+
+
+def test_vary_on_inaccessible_message_uses_effective_chat() -> None:
+    from types import SimpleNamespace
+
+    from telegram.ext import CallbackQueryHandler
+
+    from web.bot import build_application
+
+    studio = FakeStudio()
+    application = build_application("123:abc", studio)
+    handler = next(h for h in application.handlers[0] if isinstance(h, CallbackQueryHandler))
+
+    async def answer() -> None: ...
+
+    old_message = SimpleNamespace()  # like telegram.InaccessibleMessage: no .chat_id attribute
+    query = SimpleNamespace(data="vary:tok123", message=old_message, from_user=SimpleNamespace(id=42), answer=answer)
+    update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=555))
+    asyncio.run(handler.callback(update, SimpleNamespace(bot=object())))
+    assert studio.vary_calls == [(42, "tok123", 555)]
+
+
+def test_stop_finishes_cleanup_even_if_a_step_fails() -> None:
+    log: list[str] = []
+    app = FakeApp(log)
+
+    async def broken_stop() -> None:
+        log.append("updater.stop failed")
+        raise RuntimeError("network")
+
+    app.updater.stop = broken_stop
+
+    async def scenario():
+        runner = BotRunner(lambda: app, retry_seconds=0)
+        runner.start()
+        await asyncio.wait_for(runner.wait_started(), 2)
+        await runner.stop()
+
+    asyncio.run(scenario())
+    assert log[-3:] == ["updater.stop failed", "stop", "shutdown"]

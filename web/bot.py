@@ -57,18 +57,20 @@ def build_application(token: str, studio: StudioBot) -> Application:
         await studio.handle_text(user.id, message.text, TelegramChat(context.bot, message.chat_id))
 
     async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if query is None or not query.data or query.message is None:
+        query, chat = update.callback_query, update.effective_chat
+        if query is None or not query.data or chat is None:
             return
         await query.answer()
         if query.data.startswith(VARY_PREFIX):
             token = query.data[len(VARY_PREFIX):]
-            await studio.handle_vary(query.from_user.id, token, TelegramChat(context.bot, query.message.chat_id))
+            # effective_chat, not query.message.chat_id: old buttons arrive with an InaccessibleMessage
+            await studio.handle_vary(query.from_user.id, token, TelegramChat(context.bot, chat.id))
 
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("Telegram handler failed", exc_info=context.error)
 
-    application = Application.builder().token(token).build()
+    # Concurrent updates: a long generation must not hold up Busy replies or Vary button answers.
+    application = Application.builder().token(token).concurrent_updates(True).build()
     application.add_handler(MessageHandler(filters.TEXT, on_text))
     application.add_handler(CallbackQueryHandler(on_button))
     application.add_error_handler(on_error)
@@ -118,9 +120,11 @@ class BotRunner:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         if self._app is not None:
-            await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
+            for step in (self._app.updater.stop, self._app.stop, self._app.shutdown):
+                try:
+                    await step()
+                except Exception:  # keep shutting down even if one step fails
+                    log.warning("Telegram bot shutdown step failed", exc_info=True)
             self._app = None
 
 
