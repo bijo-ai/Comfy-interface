@@ -23,6 +23,40 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `workflow_api.json` | The ComfyUI graph, in **API format** |
 | `test_generate.py` | End-to-end test of the generation logic (no MCP) |
 | `check_mcp.py` | Minimal MCP client: lists tools and optionally calls `generate_image` |
+| `web/` | **ComfyUI Studio** web app: `app.py` (FastAPI routes), `jobs.py` (live progress), `gallery.py` (output folder), `static/` (the page) |
+| `run_web.bat` | Double-click to start the web app |
+| `tests/` | pytest suite for the client, gallery, jobs and web API |
+
+## Web app: ComfyUI Studio
+
+A local website for generating and browsing images without an LLM. Type a prompt and press **Generate**
+(or Ctrl+Enter). A live progress bar shows each sampling step, then the image appears.
+
+- **Shapes:** Square 512×512, Portrait 512×768, Landscape 768×512. **Advanced** has the negative prompt,
+  width/height, steps, CFG and seed.
+- **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made
+  in ComfyUI itself, along with the prompt and settings ComfyUI stored in each file.
+- **Full-size view:** click an image to open it. From there:
+  - **Reuse** loads its settings into the form.
+  - **Vary** makes the same image again with a new seed.
+  - **Download** saves it.
+  - **Delete** removes it from disk, after a confirmation.
+  - ←/→ move between images and Esc closes.
+- **Status:** a ComfyUI connected/offline indicator. The page reconnects by itself when ComfyUI starts.
+
+**Start it:** double-click `run_web.bat`, or run
+
+```powershell
+uv run python -m web                 # opens http://127.0.0.1:7860 in your browser
+uv run python -m web --port 8080 --no-browser
+```
+
+It only listens on `127.0.0.1`, so other devices can't reach it. ComfyUI's output folder is detected from
+ComfyUI's `--output-directory` launch flag. If that fails (e.g. a portable ComfyUI install), set
+`COMFYUI_OUTPUT_DIR` in `.env`. Thumbnails are cached in `cache/`, which is safe to delete.
+The web app doesn't write copies to `outputs/`; that folder is only used by the MCP server.
+
+**Tests:** `uv run pytest`
 
 ## Setup (Windows)
 
@@ -47,6 +81,8 @@ uv run python test_generate.py
 | `WORKFLOW_PATH` | `workflow_api.json` | API-format workflow (relative paths resolve from this folder) |
 | `OUTPUT_DIR` | `outputs` | Where PNGs and JSON sidecars are written |
 | `TIMEOUT` | `180` | Seconds to wait for a generation before giving up |
+| `COMFYUI_OUTPUT_DIR` | *(auto-detected)* | ComfyUI's output folder, shown in the web gallery |
+| `CACHE_DIR` | `cache` | Where the web app keeps gallery thumbnails |
 
 Real environment variables take precedence over `.env`.
 
