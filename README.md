@@ -27,7 +27,9 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 | `start_studio.bat` | One-click launcher: starts ComfyUI if needed, then the web app |
 | `run_web.bat` | Starts only the web app |
 | `assets/studio.ico` | App icon for a Desktop shortcut |
-| `web/bot_core.py`, `web/bot.py` | Telegram bot: behaviour (commands, access lock, Vary) and python-telegram-bot wiring |
+| `models.py`, `styles.py` | Model profiles with GPU limits; style presets |
+| `web/builders.py`, `web/catalog.py` | Turn choices into GPU-safe jobs (shared by web and bot); which models ComfyUI has |
+| `web/bot_core.py`, `web/bot.py` | Telegram bot: behaviour (commands, models, styles, ×4, upscale, access lock) and python-telegram-bot wiring |
 | `tests/` | pytest suite for the client, gallery, jobs, web API and bot |
 
 ## Web app: ComfyUI Studio
@@ -35,13 +37,21 @@ LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ─
 A local website for generating and browsing images without an LLM. Type a prompt and press **Generate**
 (or Ctrl+Enter). A live progress bar shows each sampling step, then the image appears.
 
-- **Shapes:** Square 512×512, Portrait 512×768, Landscape 768×512. **Advanced** has the negative prompt,
-  width/height, steps, CFG and seed.
+- **Model:** **DreamShaper 8** (default), SD 1.5 base, or **SDXL (heavy, slow)**. Only checkpoints installed
+  in ComfyUI are listed, and switching models also sets that model's recommended steps and CFG.
+- **Style:** ✨ None · 📷 Photo · 🎬 Cinematic · 🎨 Oil painting · ✏️ Anime · 🧱 3D render · 💧 Watercolor. A style adds
+  keywords to your prompt and negative prompt, so short prompts look good.
+- **Shapes:** Square, Portrait and Landscape: 512×512 / 512×768 / 768×512, or 1024² / 832×1216 / 1216×832 for SDXL.
+  **Advanced** has the negative prompt, width/height, steps, CFG and seed.
+- **×1 / ×4:** make 4 variations at once, shown as a 2×2 grid. Click one to open it.
+- **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
+  ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
 - **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made
   in ComfyUI itself, along with the prompt and settings ComfyUI stored in each file.
 - **Full-size view:** click an image to open it. From there:
   - **Reuse** loads its settings into the form.
   - **Vary** makes the same image again with a new seed.
+  - **🔍 Upscale ×2** makes a 2× larger, sharper version (e.g. 512×768 → 1024×1536) with a light refine pass.
   - **Download** saves it.
   - **Delete** removes it from disk, after a confirmation.
   - ←/→ move between images and Esc closes.
@@ -65,6 +75,11 @@ ComfyUI's `--output-directory` launch flag. If that fails (e.g. a portable Comfy
 `COMFYUI_OUTPUT_DIR` in `.env`. Thumbnails are cached in `cache/`, which is safe to delete.
 The web app doesn't write copies to `outputs/`; that folder is only used by the MCP server.
 
+**GPU limits (6 GB laptop GPUs):** the app refuses anything that would overload the GPU, and says why.
+- **SDXL** makes 1 image at a time (~25–60 s, ~5 GB of video memory) and can't be upscaled.
+- **×4** is limited to 768×768.
+- **Upscale** is for images up to 768 px on a side, and uses tiled decoding (~3 GB peak).
+
 **Tests:** `uv run pytest`
 
 ## Telegram bot
@@ -84,13 +99,18 @@ internet. Images land in ComfyUI's output folder and show up in the Studio galle
 
 | Send | Get |
 |---|---|
-| `a beach at sunset` | square 512×512 |
-| `/portrait an old fisherman` | portrait 512×768 |
-| `/landscape mountains at dawn` | landscape 768×512 |
-| tap **🔁 Vary** under an image | same prompt and size, new seed |
-| `/help` | these instructions |
+| `a beach at sunset` | square image |
+| `/portrait an old fisherman` | tall image |
+| `/landscape mountains at dawn` | wide image |
+| `/model` | buttons to choose the model (remembered until changed) |
+| `/style` | buttons to choose a style (remembered until changed) |
+| **🔁 Vary** under an image | same prompt and size, new seed |
+| **🖼️ ×4** under an image | 4 new variations as an album, then **🔍 1–4** buttons to upscale your favourite |
+| **🔍 Upscale** under an image | a 2× larger version, sent as a file so Telegram doesn't compress it |
+| `/help` | these instructions plus your current model and style |
 
-The bot shows live progress ("🎨 Generating… step 12/20") and captions each image with its seed. It and the
+Sizes follow the chosen model. The GPU limits above apply here too: SDXL images get only 🔁 Vary.
+The bot shows live progress ("🎨 DreamShaper 8 · step 12/25") and captions each image with its seed and model. It and the
 website share one generator: if one is busy, the other says so and asks you to try again in a moment. The PC
 must be on, online, and running Studio. If it starts offline, the bot keeps retrying every 30 seconds.
 The Studio window shows `Telegram bot: on/off` at startup.
