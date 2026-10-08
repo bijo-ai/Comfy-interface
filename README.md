@@ -65,8 +65,14 @@ A local website for generating and browsing images without an LLM. Type a prompt
   - **In Telegram:** use `/fix` (see the Telegram section).
 - **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
   ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
-- **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made
-  in ComfyUI itself, along with the prompt and settings ComfyUI stored in each file.
+- **Two tabs:** **Create** (the generator and your latest result) and **Gallery** (every image).
+  The address remembers the tab (`#gallery`), so reload and the back button work.
+- **Gallery:** every PNG in ComfyUI's output folder, newest first. That includes images you made in ComfyUI
+  itself, along with the prompt and settings stored in each file.
+  - **Search by prompt.**
+  - **Filters:** All · Generated · Edited · Fixed · Upscaled, each with a count.
+  - **Jumping back:** actions in the image viewer (Reuse, Vary, Edit, Fix, Upscale) switch to Create, so you
+    see the result forming.
 - **Full-size view:** click an image to open it. From there:
   - **Reuse** loads its settings into the form.
   - **Vary** makes the same image again with a new seed.

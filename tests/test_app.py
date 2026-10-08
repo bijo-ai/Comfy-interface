@@ -423,3 +423,14 @@ def test_inpainted_image_upscales_with_a_normal_model(settings, make_png) -> Non
     with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
         sse_events(client, client.post("/api/upscale", json={"name": "fixed.png"}).json()["job_id"])
     assert seen[0].params.model == DREAM
+
+
+def test_images_endpoint_filters(client, settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "ComfyUI_00001_.png", graph_for(GenerationParams(prompt="a red fox", seed=1)))
+    make_png(settings.comfyui_output_dir / "ComfyUI_inpaint_00001_.png", graph_for(GenerationParams(prompt="a hat", seed=2)))
+    body = client.get("/api/images?q=fox").json()
+    assert body["total"] == 1 and body["images"][0]["kind"] == "generated"
+    assert client.get("/api/images?kind=fixed").json()["total"] == 1
+    assert client.get("/api/images?kind=bogus").status_code == 422
+    counts = client.get("/api/images/counts").json()
+    assert counts == {"all": 2, "generated": 1, "edited": 0, "fixed": 1, "upscaled": 0}

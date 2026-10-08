@@ -124,3 +124,30 @@ def test_settings_read_from_upscale_and_img2img_graphs() -> None:
         read = params_from_graph(graph, size=(1024, 1536))
         assert read["prompt"] == "a fox" and read["seed"] == 9 and read["model"] == "DreamShaper_8_pruned.safetensors"
         assert (read["width"], read["height"]) == (1024, 1536)
+
+
+def test_kind_from_filename() -> None:
+    from web.gallery import image_kind
+
+    assert image_kind("ComfyUI_00012_.png") == "generated"
+    assert image_kind("ComfyUI_img2img_00001_.png") == "edited"
+    assert image_kind("ComfyUI_inpaint_00003_.png") == "fixed"
+    assert image_kind("ComfyUI_upscaled_00002_.png") == "upscaled"
+    assert image_kind("sub/ComfyUI_upscaled_00002_.png") == "upscaled"
+
+
+def test_page_filters_by_kind_and_prompt(tmp_path: Path, make_png) -> None:
+    fox = graph_for(GenerationParams(prompt="A Red Fox in snow", seed=1))
+    cat = graph_for(GenerationParams(prompt="a cat on a sofa", seed=2))
+    make_png(tmp_path / "ComfyUI_00001_.png", fox)
+    make_png(tmp_path / "ComfyUI_00002_.png", cat)
+    make_png(tmp_path / "ComfyUI_upscaled_00001_.png", fox)
+    make_png(tmp_path / "ComfyUI_img2img_00001_.png")  # no settings: never matches a search
+    gallery = Gallery(tmp_path, tmp_path / "cache")
+    assert gallery.page(0, 10, kind="upscaled")[0] == 1
+    total, images = gallery.page(0, 10, query="red fox")
+    assert total == 2 and {i.name for i in images} == {"ComfyUI_00001_.png", "ComfyUI_upscaled_00001_.png"}
+    assert gallery.page(0, 10, query="fox", kind="generated")[0] == 1
+    assert gallery.page(0, 10, kind="edited")[0] == 1
+    assert gallery.page(0, 10)[0] == 4
+    assert gallery.page(0, 10)[1][0].to_json()["kind"] in {"generated", "upscaled", "edited"}

@@ -44,7 +44,7 @@ from web.builders import (
     resolve_profile,
 )
 from web.catalog import ModelCatalog
-from web.gallery import Gallery
+from web.gallery import KINDS, Gallery
 from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, Runner, UpscaleRequest
 from web.sources import SourceStore
 from web.users import UserStore
@@ -342,10 +342,16 @@ def create_app(
         return Response(job.preview, media_type=media_type, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/images")
-    async def list_images(offset: int = 0, limit: int = 60) -> dict[str, Any]:
+    async def list_images(offset: int = 0, limit: int = 60, q: str = "", kind: str | None = None) -> dict[str, Any]:
         gallery = await require_gallery()
-        total, images = gallery.page(max(offset, 0), min(max(limit, 1), MAX_PAGE))
+        if kind and kind not in KINDS:
+            raise ApiError(422, f"Unknown kind {kind!r}. Use one of: {', '.join(KINDS)}.")
+        total, images = gallery.page(max(offset, 0), min(max(limit, 1), MAX_PAGE), query=q, kind=kind or None)
         return {"total": total, "images": [image.to_json() for image in images]}
+
+    @app.get("/api/images/counts")  # declared before /api/images/{name} so "counts" isn't taken as a file name
+    async def image_counts() -> dict[str, int]:
+        return (await require_gallery()).counts()
 
     @app.get("/api/images/{name:path}")
     async def get_image(name: str, download: bool = False) -> FileResponse:

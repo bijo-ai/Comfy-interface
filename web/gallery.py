@@ -16,6 +16,14 @@ from comfy_client import WorkflowError, find_single_node, identify_nodes, linked
 log = logging.getLogger(__name__)
 
 THUMB_WIDTH = 320
+KINDS = ("generated", "edited", "fixed", "upscaled")
+_KIND_PREFIXES = (("ComfyUI_img2img", "edited"), ("ComfyUI_inpaint", "fixed"), ("ComfyUI_upscaled", "upscaled"))
+
+
+def image_kind(name: str) -> str:
+    """How an image was made, from the filename prefix each Studio workflow saves with."""
+    filename = name.rsplit("/", 1)[-1]
+    return next((kind for prefix, kind in _KIND_PREFIXES if filename.startswith(prefix)), "generated")
 NUMERIC_KEYS = ("width", "height", "steps", "cfg", "seed")
 
 
@@ -28,7 +36,7 @@ class GalleryImage:
     params: dict[str, Any] | None
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "kind": image_kind(self.name)}
 
 
 def resolve_safe(output_dir: Path, name: str) -> Path:
@@ -115,9 +123,26 @@ class Gallery:
     def path(self, name: str) -> Path:
         return resolve_safe(self.output_dir, name)
 
-    def page(self, offset: int, limit: int) -> tuple[int, list[GalleryImage]]:
+    def page(self, offset: int, limit: int, query: str = "", kind: str | None = None) -> tuple[int, list[GalleryImage]]:
+        """Newest first; optionally only one kind, and/or images whose prompt contains `query`."""
         files = self._scan()
-        return len(files), [self._describe(path, mtime) for path, mtime in files[offset : offset + limit]]
+        if kind:
+            files = [(path, mtime) for path, mtime in files if image_kind(path.name) == kind]
+        if not query.strip():
+            return len(files), [self._describe(path, mtime) for path, mtime in files[offset : offset + limit]]
+        needle = query.strip().lower()
+        matches = [
+            image for image in (self._describe(path, mtime) for path, mtime in files)
+            if image.params and needle in image.params["prompt"].lower()
+        ]
+        return len(matches), matches[offset : offset + limit]
+
+    def counts(self) -> dict[str, int]:
+        counts = dict.fromkeys(("all", *KINDS), 0)
+        for path, _ in self._scan():
+            counts["all"] += 1
+            counts[image_kind(path.name)] += 1
+        return counts
 
     def get(self, name: str) -> GalleryImage:
         path = self._existing(name)

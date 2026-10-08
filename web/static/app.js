@@ -16,6 +16,8 @@ const els = {
   sourceFix: $("#source-fix"),
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
+  createView: $("#create-view"), galleryView: $("#gallery-view"), tabs: [...document.querySelectorAll(".tab")],
+  tabCount: $("#tab-count"), search: $("#gallery-search"), filters: [...document.querySelectorAll("#gallery-filters .chip")],
 };
 const lb = {
   dialog: $("#lightbox"), img: $("#lb-img"), prompt: $("#lb-prompt"), negative: $("#lb-negative"), meta: $("#lb-meta"),
@@ -33,6 +35,9 @@ const state = {
   images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
   models: [], model: null, modelSignature: "", style: "none", count: 1, source: null, inpaint: false,
   painting: null, // { source fields, width, height } while the painter is open
+  stageImages: [], // what the stage shows (one image, or a ×4 grid)
+  lbList: [], // the list the lightbox steps through (the filtered gallery, or the stage's images)
+  query: "", kind: "", galleryStale: false, tab: "create",
 };
 const MAX_BATCH_SIDE = 768;
 const UPSCALE_MAX_SIDE = 768;
@@ -514,6 +519,7 @@ async function upscaleImage(image) {
 
 async function runJob(path, body, width, height) {
   if (state.busy) return;
+  showTab("create"); // jobs started from the gallery's viewer show their live preview here
   setBusy(true);
   startLive(width, height);
   try {
@@ -533,8 +539,10 @@ async function runJob(path, body, width, height) {
 }
 
 function restoreStage() {
-  const current = state.images.find((image) => image.name === state.stageName);
-  current ? showOnStage(current, "Latest") : clearStage();
+  const images = state.stageImages;
+  if (images.length > 1) showGrid(images, "Latest");
+  else if (images.length === 1) showOnStage(images[0], "Latest");
+  else clearStage();
 }
 
 function onGenerated(event) {
@@ -544,9 +552,8 @@ function onGenerated(event) {
     restoreStage();
     return;
   }
-  state.images.unshift(...images);
-  state.total += images.length;
-  renderGallery();
+  state.galleryStale = true; // the gallery reloads (with its filters) next time it's shown
+  refreshCounts();
   const caption = `Seed ${event.seed} · ${event.elapsed}s`;
   if (images.length > 1) showGrid(images, caption);
   else showOnStage(images[0], caption, "from-live");
@@ -556,12 +563,13 @@ function onGenerated(event) {
 
 function showGrid(images, caption) {
   state.stageName = images[0].name;
+  state.stageImages = images;
   els.stageGrid.style.setProperty("--aspect", String(images[0].width / images[0].height));
   els.stageGrid.replaceChildren(...images.map((image) => {
     const img = document.createElement("img");
     img.src = imageUrl(image.name);
     img.alt = image.params?.prompt ?? image.name;
-    img.addEventListener("click", () => openLightbox(state.images.findIndex((item) => item.name === image.name)));
+    img.addEventListener("click", () => openLightbox(image, state.stageImages));
     return img;
   }));
   els.stageImg.hidden = true;
@@ -573,6 +581,7 @@ function showGrid(images, caption) {
 function showOnStage(image, caption, animation = "reveal") {
   els.stageGrid.hidden = true;
   state.stageName = image.name;
+  state.stageImages = [image];
   els.stageImg.src = imageUrl(image.name);
   els.stageImg.alt = image.params?.prompt ?? image.name;
   els.stageImg.hidden = false;
@@ -586,6 +595,7 @@ function showOnStage(image, caption, animation = "reveal") {
 function clearStage() {
   els.stageGrid.hidden = true;
   state.stageName = null;
+  state.stageImages = [];
   els.stageImg.hidden = true;
   els.stageEmpty.hidden = false;
   els.stageCaption.textContent = "";
@@ -593,7 +603,7 @@ function clearStage() {
 
 // --- gallery ---------------------------------------------------------------
 
-function tile(image, index) {
+function tile(image) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "tile";
@@ -606,32 +616,87 @@ function tile(image, index) {
   img.addEventListener("error", () => button.classList.add("broken"));
   img.src = imageUrl(image.name, "thumbs");
   button.append(img);
-  button.addEventListener("click", () => openLightbox(index));
+  button.addEventListener("click", () => openLightbox(image, state.images));
   return button;
 }
 
 function renderGallery() {
   els.gallery.replaceChildren(...state.images.map(tile));
-  els.galleryCount.textContent = state.total ? `${state.total} image${state.total === 1 ? "" : "s"}` : "";
+  const filtered = state.query || state.kind;
+  els.galleryCount.textContent = state.total ? `${state.total} image${state.total === 1 ? "" : "s"}${filtered ? " match" : ""}` : "";
   els.galleryEmpty.hidden = state.total > 0;
-  if (!state.total) els.galleryEmpty.textContent = "No images yet. Generate your first one above.";
+  if (!state.total) {
+    els.galleryEmpty.textContent = filtered
+      ? "No images match. Try another search or filter."
+      : "No images yet. Make your first one in Create.";
+  }
   els.loadMore.hidden = state.images.length >= state.total;
 }
 
 async function loadGallery(reset = false) {
   const offset = reset ? 0 : state.images.length;
+  const filters = `&q=${encodeURIComponent(state.query)}${state.kind ? `&kind=${state.kind}` : ""}`;
   try {
-    const data = await api(`/api/images?offset=${offset}&limit=${PAGE_SIZE}`);
+    const data = await api(`/api/images?offset=${offset}&limit=${PAGE_SIZE}${filters}`);
     state.images = reset ? data.images : state.images.concat(data.images);
     state.total = data.total;
     state.galleryUnavailable = false;
+    state.galleryStale = false;
     renderGallery();
-    if (reset && !state.stageName && state.images[0]) showOnStage(state.images[0], "Latest");
   } catch (error) {
     state.galleryUnavailable = true;
     els.galleryEmpty.hidden = false;
     els.galleryEmpty.textContent = error.message;
   }
+}
+
+async function refreshCounts() {
+  try {
+    const counts = await api("/api/images/counts");
+    els.tabCount.textContent = counts.all ? String(counts.all) : "";
+    for (const badge of document.querySelectorAll(".chip-count")) badge.textContent = counts[badge.dataset.count] || "";
+  } catch {
+    // offline: counts refresh with the next change
+  }
+}
+
+async function showLatestOnStage() {
+  if (state.stageName) return;
+  try {
+    const latest = (await api("/api/images?limit=1")).images[0];
+    if (latest && !state.stageName) showOnStage(latest, "Latest");
+  } catch {
+    // ComfyUI's folder unknown yet
+  }
+}
+
+function setFilter(kind) {
+  state.kind = kind;
+  for (const chip of els.filters) chip.setAttribute("aria-checked", String(chip.dataset.kind === kind));
+  loadGallery(true);
+}
+
+let searchTimer = null;
+function onSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.query = els.search.value.trim();
+    loadGallery(true);
+  }, 300);
+}
+
+// --- tabs ------------------------------------------------------------------
+
+function showTab(name) {
+  state.tab = name === "gallery" ? "gallery" : "create";
+  els.createView.hidden = state.tab !== "create";
+  els.galleryView.hidden = state.tab !== "gallery";
+  for (const tab of els.tabs) {
+    if (tab.dataset.tab === state.tab) tab.setAttribute("aria-current", "page");
+    else tab.removeAttribute("aria-current");
+  }
+  if (location.hash !== `#${state.tab}`) history.replaceState(null, "", `#${state.tab}`);
+  if (state.tab === "gallery" && (state.galleryStale || !state.images.length)) loadGallery(true);
 }
 
 // --- lightbox --------------------------------------------------------------
@@ -650,13 +715,15 @@ function metaRows(image) {
   });
 }
 
-// The lightbox tracks its image by name: generations and deletes shift positions in state.images.
-const currentIndex = () => state.images.findIndex((image) => image.name === state.currentName);
-const currentImage = () => state.images[currentIndex()];
+// The lightbox tracks its image by name (lists shift when images are made or deleted) and steps through
+// the list it was opened from: the filtered gallery, or the stage's results.
+const currentIndex = () => state.lbList.findIndex((image) => image.name === state.currentName);
+const currentImage = () => state.lbList[currentIndex()];
+const lightboxTotal = () => (state.lbList === state.images ? state.total : state.lbList.length);
 
 function renderLightbox() {
   const index = currentIndex();
-  const image = state.images[index];
+  const image = state.lbList[index];
   const params = image.params;
   lb.img.src = imageUrl(image.name);
   lb.img.alt = params?.prompt ?? image.name;
@@ -675,13 +742,14 @@ function renderLightbox() {
   lb.fix.disabled = state.busy || !image.width;
   lb.download.href = `${imageUrl(image.name)}?download=1`;
   lb.prev.disabled = index <= 0;
-  lb.next.disabled = index >= state.total - 1;
+  lb.next.disabled = index >= lightboxTotal() - 1;
   lb.confirm.hidden = true;
   lb.remove.hidden = false;
 }
 
-function openLightbox(index) {
-  state.currentName = state.images[index].name;
+function openLightbox(image, list = state.images) {
+  state.lbList = list;
+  state.currentName = image.name;
   renderLightbox();
   if (!lb.dialog.open) lb.dialog.showModal();
 }
@@ -696,9 +764,12 @@ function upscaleProblem(image) {
 
 async function stepLightbox(delta) {
   const target = currentIndex() + delta;
-  if (target < 0 || target >= state.total) return;
-  if (target >= state.images.length) await loadGallery();
-  if (target < state.images.length) openLightbox(target);
+  if (target < 0 || target >= lightboxTotal()) return;
+  if (state.lbList === state.images && target >= state.images.length) {
+    await loadGallery();
+    state.lbList = state.images; // loading more makes a new list
+  }
+  if (target < state.lbList.length) openLightbox(state.lbList[target], state.lbList);
 }
 
 async function deleteCurrent() {
@@ -711,20 +782,30 @@ async function deleteCurrent() {
       return;
     }
   }
-  const index = state.images.findIndex((candidate) => candidate.name === image.name);
-  if (index < 0) return;
-  state.images.splice(index, 1);
-  state.total -= 1;
+  const index = currentIndex();
+  const galleryIndex = state.images.findIndex((candidate) => candidate.name === image.name);
+  if (galleryIndex >= 0) {
+    state.images.splice(galleryIndex, 1);
+    state.total -= 1;
+  }
+  if (state.lbList !== state.images) state.lbList = state.lbList.filter((candidate) => candidate.name !== image.name);
   renderGallery();
-  if (state.stageName === image.name) {
-    state.images[0] ? showOnStage(state.images[0], "Latest") : clearStage();
+  refreshCounts();
+  if (state.stageImages.some((candidate) => candidate.name === image.name)) {
+    state.stageImages = state.stageImages.filter((candidate) => candidate.name !== image.name);
+    state.stageName = null;
+    if (state.stageImages.length) restoreStage();
+    else {
+      clearStage();
+      showLatestOnStage();
+    }
   }
   toast("Image deleted.");
-  if (!state.images.length) {
+  if (!state.lbList.length) {
     lb.dialog.close();
     return;
   }
-  openLightbox(Math.min(index, state.images.length - 1));
+  openLightbox(state.lbList[Math.min(index, state.lbList.length - 1)], state.lbList);
 }
 
 // --- status ----------------------------------------------------------------
@@ -739,7 +820,11 @@ async function checkStatus() {
   els.status.dataset.state = online ? "online" : "offline";
   els.statusText.textContent = online ? "ComfyUI connected" : "ComfyUI offline";
   els.banner.hidden = online;
-  if (online && state.galleryUnavailable) loadGallery(true);
+  if (online && state.galleryUnavailable) {
+    loadGallery(true);
+    refreshCounts();
+    showLatestOnStage();
+  }
   if (online) loadModels();
 }
 
@@ -760,9 +845,11 @@ els.width.addEventListener("input", syncShapes);
 els.height.addEventListener("input", syncShapes);
 els.loadMore.addEventListener("click", () => loadGallery());
 els.stageImg.addEventListener("click", () => {
-  const index = state.images.findIndex((image) => image.name === state.stageName);
-  if (index >= 0) openLightbox(index);
+  if (state.stageImages.length) openLightbox(state.stageImages[0], state.stageImages);
 });
+for (const chip of els.filters) chip.addEventListener("click", () => setFilter(chip.dataset.kind));
+els.search.addEventListener("input", onSearch);
+window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
 lb.close.addEventListener("click", () => lb.dialog.close());
 lb.dialog.addEventListener("click", (event) => {
@@ -778,6 +865,7 @@ lb.reuse.addEventListener("click", () => {
   fillComposer(currentImage().params);
   els.advanced.open = true;
   lb.dialog.close();
+  showTab("create");
   window.scrollTo({ top: 0, behavior: "smooth" });
   els.prompt.focus();
 });
@@ -793,6 +881,7 @@ lb.edit.addEventListener("click", () => {
   setSource({ name: image.name, width: image.width, height: image.height, url: imageUrl(image.name) });
   if (!els.prompt.value.trim() && image.params) els.prompt.value = image.params.prompt;
   lb.dialog.close();
+  showTab("create");
   window.scrollTo({ top: 0, behavior: "smooth" });
   els.prompt.focus();
 });
@@ -875,6 +964,9 @@ lb.confirmYes.addEventListener("click", deleteCurrent);
 
 els.negative.value = DEFAULT_NEGATIVE;
 loadModels();
-loadGallery(true);
+showTab(location.hash.slice(1));
+if (state.tab === "create") loadGallery(true); // keeps the lightbox's gallery list ready
+showLatestOnStage();
+refreshCounts();
 checkStatus();
 setInterval(checkStatus, STATUS_INTERVAL_MS);

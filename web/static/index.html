@@ -11,6 +11,10 @@
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark" aria-hidden="true"></span>ComfyUI <span>Studio</span></div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#create" class="tab" data-tab="create">Create</a>
+      <a href="#gallery" class="tab" data-tab="gallery">Gallery <span id="tab-count" class="tab-count"></span></a>
+    </nav>
     <div id="status" class="status" data-state="checking" role="status">
       <span class="dot" aria-hidden="true"></span><span class="status-text">Checking ComfyUI…</span>
     </div>
@@ -20,7 +24,7 @@
     ComfyUI isn't reachable. Start the ComfyUI app and this page will reconnect on its own.
   </div>
 
-  <main class="layout">
+  <main id="create-view" class="layout">
     <form id="composer" class="composer panel" autocomplete="off" novalidate>
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" rows="4" placeholder="A red fox in a snowy forest, golden hour, photo"></textarea>
@@ -89,10 +93,17 @@
     </section>
   </main>
 
-  <section class="gallery-section" aria-labelledby="gallery-title">
-    <div class="gallery-head">
-      <h2 id="gallery-title">Gallery</h2>
-      <span id="gallery-count" class="muted"></span>
+  <section id="gallery-view" class="gallery-section" aria-label="Gallery" hidden>
+    <div class="gallery-toolbar">
+      <input id="gallery-search" type="search" placeholder="Search prompts…" aria-label="Search prompts" autocomplete="off">
+      <div id="gallery-filters" class="chips" role="radiogroup" aria-label="Show">
+        <button type="button" class="chip" role="radio" data-kind="" aria-checked="true">All <span class="chip-count" data-count="all"></span></button>
+        <button type="button" class="chip" role="radio" data-kind="generated" aria-checked="false">✨ Generated <span class="chip-count" data-count="generated"></span></button>
+        <button type="button" class="chip" role="radio" data-kind="edited" aria-checked="false">🎨 Edited <span class="chip-count" data-count="edited"></span></button>
+        <button type="button" class="chip" role="radio" data-kind="fixed" aria-checked="false">🖌️ Fixed <span class="chip-count" data-count="fixed"></span></button>
+        <button type="button" class="chip" role="radio" data-kind="upscaled" aria-checked="false">🔍 Upscaled <span class="chip-count" data-count="upscaled"></span></button>
+      </div>
+      <span id="gallery-count" class="muted gallery-count"></span>
     </div>
     <div id="gallery" class="gallery"></div>
     <p id="gallery-empty" class="muted gallery-empty" hidden></p>
