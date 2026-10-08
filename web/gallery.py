@@ -68,6 +68,9 @@ def params_from_graph(graph: Any) -> dict[str, Any] | None:
         }
     except (WorkflowError, KeyError, TypeError, AttributeError):
         return None
+    loaders = [node for node in graph.values() if node.get("class_type") == "CheckpointLoaderSimple"]
+    if len(loaders) == 1 and isinstance(ckpt := loaders[0].get("inputs", {}).get("ckpt_name"), str):
+        params["model"] = ckpt
     texts_ok = isinstance(params["prompt"], str) and isinstance(params["negative_prompt"], str)
     numbers_ok = all(
         isinstance(params[key], int | float) and not isinstance(params[key], bool) for key in NUMERIC_KEYS

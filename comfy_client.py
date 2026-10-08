@@ -14,7 +14,7 @@ import struct
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +75,8 @@ class GenerationParams:
     steps: int = 20
     cfg: float = 8.0
     seed: int | None = None
+    model: str | None = None  # checkpoint filename; None keeps the workflow's
+    batch: int = 1
 
     def validate(self) -> None:
         problems: list[str] = []
@@ -91,6 +93,8 @@ class GenerationParams:
             problems.append(f"cfg must be between 1.0 and 30.0 (got {self.cfg})")
         if self.seed is not None and not 0 <= self.seed <= MAX_SEED:
             problems.append(f"seed must be between 0 and {MAX_SEED} (got {self.seed})")
+        if not 1 <= self.batch <= 4:
+            problems.append(f"batch must be between 1 and 4 (got {self.batch})")
         if problems:
             raise InvalidParamsError("Invalid parameters: " + "; ".join(problems) + ".")
 
@@ -108,6 +112,7 @@ class GenerationResult:
     prompt_id: str
     elapsed: float
     comfy_file: dict[str, str]
+    comfy_files: list[dict[str, str]] = field(default_factory=list)
 
 
 # --- Workflow handling --------------------------------------------------------
@@ -188,6 +193,9 @@ def apply_params(template: Workflow, params: GenerationParams) -> tuple[Workflow
     workflow[roles.negative]["inputs"]["text"] = params.negative_prompt
     workflow[roles.latent]["inputs"].update(width=params.width, height=params.height)
     workflow[roles.sampler]["inputs"].update(steps=params.steps, cfg=params.cfg, seed=params.seed)
+    workflow[roles.latent]["inputs"]["batch_size"] = params.batch
+    if params.model:
+        workflow[find_single_node(workflow, "CheckpointLoaderSimple")]["inputs"]["ckpt_name"] = params.model
     return workflow, roles
 
 
@@ -227,6 +235,14 @@ class ComfyClient:
             raise WorkflowError("ComfyUI rejected the workflow: " + _describe_rejection(response))
         response.raise_for_status()
         return response.json()["prompt_id"]
+
+    async def list_checkpoints(self) -> list[str]:
+        response = await self._request("GET", "/object_info/CheckpointLoaderSimple")
+        response.raise_for_status()
+        spec = response.json()["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"]
+        if spec and spec[0] == "COMBO":  # newer ComfyUI: ["COMBO", {"options": [...]}]
+            return list(spec[1].get("options", []))
+        return list(spec[0])
 
     async def get_history(self, prompt_id: str) -> dict[str, Any] | None:
         response = await self._request("GET", f"/history/{prompt_id}")
@@ -294,7 +310,7 @@ async def _open_ws(url: str) -> Any:
         return None
 
 
-PREVIEW_METHOD = "latent2rgb"  # built into ComfyUI, no extra model needed
+PREVIEW_METHOD = "auto"  # TAESD when its decoder is in models/vae_approx, else ComfyUI falls back to latent2rgb
 PREVIEW_IMAGE = 1  # ComfyUI BinaryEventTypes
 PREVIEW_IMAGE_WITH_METADATA = 4
 
@@ -366,7 +382,7 @@ def _describe_execution_error(data: dict[str, Any]) -> str:
     )
 
 
-def _first_image(entry: dict[str, Any], preferred_node: str) -> dict[str, str]:
+def _output_images(entry: dict[str, Any], preferred_node: str) -> list[dict[str, str]]:
     status = entry.get("status", {})
     if status.get("status_str") == "error":
         for name, data in status.get("messages", []):
@@ -378,7 +394,7 @@ def _first_image(entry: dict[str, Any], preferred_node: str) -> dict[str, str]:
     for node_id in ordered:
         images = outputs.get(node_id, {}).get("images", [])
         if images:
-            return images[0]
+            return images
     raise GenerationFailedError("ComfyUI finished but produced no output image.")
 
 
@@ -420,7 +436,8 @@ async def generate(
         finally:
             if ws is not None:
                 await ws.close()
-        image_ref = _first_image(entry, roles.save)
+        image_refs = _output_images(entry, roles.save)
+        image_ref = image_refs[0]
         image = await client.fetch_image(image_ref)
 
     elapsed = time.monotonic() - started
@@ -445,4 +462,5 @@ async def generate(
         prompt_id=prompt_id,
         elapsed=elapsed,
         comfy_file=image_ref,
+        comfy_files=image_refs,
     )

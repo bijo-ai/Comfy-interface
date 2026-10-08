@@ -28,7 +28,7 @@ def test_read_params_from_embedded_graph(tmp_path: Path, make_png) -> None:
     width, height, params = read_png(path)
     assert (width, height) == (512, 768)
     assert params == {"prompt": "a fox", "negative_prompt": "blurry", "width": 512, "height": 768,
-                      "steps": 12, "cfg": 6.5, "seed": 99}
+                      "steps": 12, "cfg": 6.5, "seed": 99, "model": "v1-5-pruned-emaonly.safetensors"}
 
 
 def test_read_params_without_chunk(tmp_path: Path, make_png) -> None:
@@ -105,3 +105,9 @@ def test_png_with_oversized_text_chunk_is_listed(tmp_path: Path) -> None:
     Image.new("RGB", (8, 8)).save(tmp_path / "huge.png", pnginfo=info)
     _, images = Gallery(tmp_path, tmp_path / "cache").page(0, 10)
     assert [(i.name, i.params) for i in images] == [("huge.png", None)]
+
+
+def test_read_params_includes_model() -> None:
+    graph = graph_for(PARAMS)
+    graph["4"]["inputs"]["ckpt_name"] = "DreamShaper_8_pruned.safetensors"
+    assert params_from_graph(graph)["model"] == "DreamShaper_8_pruned.safetensors"
