@@ -304,3 +304,51 @@ def test_batch_payload_lists_existing_images(settings, make_png, monkeypatch) ->
         done = sse_events(client, job_id)[-1]
     assert [i["name"] for i in done["images"]] == ["b0.png", "b1.png", "b3.png"]
     assert done["image"]["name"] == "b0.png"
+
+
+# --- image-to-image --------------------------------------------------------------------------
+
+def _jpeg(size=(800, 600)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (200, 50, 50)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def test_upload_source_then_img2img(settings) -> None:
+    from web.jobs import Img2ImgRequest
+
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        upload = client.post("/api/sources", content=_jpeg(), headers={"Content-Type": "image/jpeg"})
+        assert upload.status_code == 200
+        source = upload.json()
+        assert (source["width"], source["height"]) == (800, 600)
+        assert client.get(f"/api/sources/{source['id']}").headers["content-type"] == "image/png"
+        body = {"prompt": "make it winter", "source_id": source["id"], "strength": 0.4, "model": "dreamshaper"}
+        sse_events(client, client.post("/api/generate", json=body).json()["job_id"])
+    request = seen[0]
+    assert isinstance(request, Img2ImgRequest) and request.strength == 0.4
+    assert (request.params.width, request.params.height, request.params.model) == (768, 576, DREAM)
+
+
+def test_img2img_from_gallery_image(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "cat.png", size=(512, 768))
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        body = {"prompt": "as a watercolor", "source_name": "cat.png"}
+        sse_events(client, client.post("/api/generate", json=body).json()["job_id"])
+    assert seen[0].source == (settings.comfyui_output_dir / "cat.png").resolve()
+    assert (seen[0].params.width, seen[0].params.height, seen[0].strength) == (512, 768, 0.55)
+
+
+def test_img2img_errors(settings) -> None:
+    with TestClient(recording_app(settings, []), base_url=BASE_URL) as client:
+        not_image = client.post("/api/sources", content=b"hello", headers={"Content-Type": "image/png"})
+        missing = client.post("/api/generate", json={"prompt": "a", "source_id": "0" * 32})
+        gone = client.post("/api/generate", json={"prompt": "a", "source_name": "nope.png"})
+    assert not_image.status_code == 422 and "isn't an image" in not_image.json()["error"]
+    assert missing.status_code == 404 and gone.status_code == 404

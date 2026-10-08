@@ -20,7 +20,14 @@ class UpscaleRequest:
     params: GenerationParams  # prompt, negative, seed, cfg, model and source size to refine with
 
 
-JobRequest = GenerationParams | UpscaleRequest
+@dataclass(frozen=True)
+class Img2ImgRequest:
+    source: Path  # start image (gallery PNG or stored upload)
+    params: GenerationParams  # prompt, size (already fitted to the model), model, batch...
+    strength: float  # 0..1: how much the picture may change
+
+
+JobRequest = GenerationParams | UpscaleRequest | Img2ImgRequest
 Runner = Callable[[JobRequest, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20
 

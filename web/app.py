@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 from pydantic import BaseModel
 
 from comfy_client import (
@@ -25,6 +26,7 @@ from comfy_client import (
     ProgressCallback,
     generate,
     get_output_dir,
+    img2img,
     upscale,
 )
 from config import Settings, load_settings
@@ -32,10 +34,11 @@ from models import PROFILES
 from styles import STYLES
 from web.bot import BotRunner, build_application, register_commands
 from web.bot_core import StudioBot
-from web.builders import build_generation, build_upscale, resolve_profile
+from web.builders import DEFAULT_STRENGTH, build_generation, build_img2img, build_upscale, resolve_profile
 from web.catalog import ModelCatalog
 from web.gallery import Gallery
-from web.jobs import BusyError, JobManager, JobRequest, Runner, UpscaleRequest
+from web.jobs import BusyError, Img2ImgRequest, JobManager, JobRequest, Runner, UpscaleRequest
+from web.sources import SourceStore
 from web.users import UserStore
 
 log = logging.getLogger(__name__)
@@ -60,6 +63,9 @@ class GenerateRequest(BaseModel):
     model: str | None = None  # profile key; None = default model
     style: str = "none"
     batch: int = 1
+    source_id: str | None = None  # uploaded start image (image-to-image)
+    source_name: str | None = None  # or a gallery image as the start image
+    strength: float = DEFAULT_STRENGTH
 
 
 class UpscaleBody(BaseModel):
@@ -98,6 +104,8 @@ def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
     async def run(request: JobRequest, on_progress: ProgressCallback, on_preview: PreviewCallback) -> dict[str, Any]:
         if isinstance(request, UpscaleRequest):
             result = await upscale(request.source, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, Img2ImgRequest):
+            result = await img2img(request.source, request.params, request.strength, settings, on_progress, on_preview)
         else:
             result = await generate(request, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
@@ -138,6 +146,7 @@ def create_app(
     settings = settings or load_settings()
     galleries = GalleryProvider(settings, output_dir)
     catalog = catalog or ModelCatalog(settings.comfyui_url)
+    sources = SourceStore(settings.cache_dir / "sources")
     jobs = JobManager(runner or make_runner(settings, galleries))
 
     @asynccontextmanager
@@ -193,16 +202,44 @@ def create_app(
 
     @app.post("/api/generate")
     async def start_generation(body: GenerateRequest) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = None
+        with image_errors():
+            if body.source_id:
+                source = sources.path(body.source_id)
+            elif body.source_name:
+                source = gallery.path(body.source_name)
+                if not source.is_file():
+                    raise FileNotFoundError(body.source_name)
         try:
             profile = resolve_profile(body.model, await catalog.available())
-            params = build_generation(
-                prompt=body.prompt, negative_prompt=body.negative_prompt, width=body.width, height=body.height,
-                steps=body.steps, cfg=body.cfg, seed=body.seed, batch=body.batch, style=body.style, profile=profile,
+            common = dict(
+                prompt=body.prompt, negative_prompt=body.negative_prompt, steps=body.steps, cfg=body.cfg,
+                seed=body.seed, batch=body.batch, style=body.style, profile=profile,
             )
+            if source is not None:
+                request = build_img2img(source=source, strength=body.strength, **common)
+            else:
+                request = build_generation(width=body.width, height=body.height, **common)
         except InvalidParamsError as exc:
             raise ApiError(422, str(exc)) from exc
-        await require_gallery()
-        return start_job(params)
+        return start_job(request)
+
+    @app.post("/api/sources")
+    async def upload_source(request: Request) -> dict[str, Any]:
+        try:
+            source_id = sources.save(await request.body())
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        with Image.open(sources.path(source_id)) as img:
+            width, height = img.size
+        return {"id": source_id, "width": width, "height": height}
+
+    @app.get("/api/sources/{source_id}")
+    async def get_source(source_id: str) -> FileResponse:
+        with image_errors():
+            path = sources.path(source_id)
+        return FileResponse(path, media_type="image/png")
 
     def start_job(request: JobRequest) -> dict[str, str]:
         try:

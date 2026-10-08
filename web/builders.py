@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError
+from PIL import Image
+
+from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError, fit_size
 from models import ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import apply_style
 from web.gallery import GalleryImage
-from web.jobs import UpscaleRequest
+from web.jobs import Img2ImgRequest, UpscaleRequest
 
 UPSCALE_MAX_SIDE = 768  # ×2 of this is the largest image the 6 GB GPU refines comfortably
+IMG2IMG_MAX_SIDE = {"sd15": 768, "sdxl": 1024}  # start images are resized to fit these
+DEFAULT_STRENGTH = 0.55
 FALLBACK_UPSCALE_PROMPT = "high quality, detailed"
 FALLBACK_LIMITS = profile_by_key("sd15")
 
@@ -51,6 +55,38 @@ def build_generation(
     params.validate()
     check_limits(profile or FALLBACK_LIMITS, width, height, batch)
     return params
+
+
+def build_img2img(
+    *,
+    source: Path,
+    prompt: str,
+    negative_prompt: str,
+    steps: int,
+    cfg: float,
+    seed: int | None,
+    batch: int,
+    style: str,
+    strength: float,
+    profile: ModelProfile | None,
+) -> Img2ImgRequest:
+    """Plan an image-to-image job: the start image is fitted to a GPU-safe size for the chosen model."""
+    if not 0.05 <= strength <= 1.0:
+        raise InvalidParamsError(f"strength must be between 0.05 and 1.0 (got {strength}).")
+    try:
+        with Image.open(source) as img:
+            source_width, source_height = img.size
+    except OSError as exc:
+        raise InvalidParamsError("The start image can't be read.") from exc
+    max_side = IMG2IMG_MAX_SIDE[profile.family if profile else "sd15"]
+    width, height = fit_size(source_width, source_height, max_side)
+    params = build_generation(
+        prompt=prompt, negative_prompt=negative_prompt, width=width, height=height,
+        steps=steps, cfg=cfg, seed=seed, batch=batch, style=style, profile=profile,
+    )
+    if params.model is None:
+        params = GenerationParams(**{**params.__dict__, "model": FALLBACK_LIMITS.ckpt})
+    return Img2ImgRequest(source=source, params=params, strength=strength)
 
 
 def build_upscale(image: GalleryImage, source: Path, available: list[ModelProfile]) -> UpscaleRequest:
