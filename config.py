@@ -17,6 +17,8 @@ class Settings:
     workflow_path: Path
     output_dir: Path
     timeout: float
+    comfyui_output_dir: Path | None
+    cache_dir: Path
 
 
 def _resolve(path_str: str) -> Path:
@@ -35,4 +37,6 @@ def load_settings() -> Settings:
         workflow_path=_resolve(os.getenv("WORKFLOW_PATH", "workflow_api.json")),
         output_dir=_resolve(os.getenv("OUTPUT_DIR", "outputs")),
         timeout=float(os.getenv("TIMEOUT", "180")),
+        comfyui_output_dir=_resolve(raw) if (raw := os.getenv("COMFYUI_OUTPUT_DIR", "").strip()) else None,
+        cache_dir=_resolve(os.getenv("CACHE_DIR", "cache")),
     )

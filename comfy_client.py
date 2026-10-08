@@ -12,6 +12,7 @@ import logging
 import random
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from config import Settings
 log = logging.getLogger(__name__)
 
 Workflow = dict[str, dict[str, Any]]
+ProgressCallback = Callable[[int, int], None]
 
 MAX_SEED = 2**32 - 1
 POLL_INTERVAL = 1.0
@@ -99,11 +101,11 @@ class GenerationParams:
 @dataclass
 class GenerationResult:
     image: bytes
-    saved_path: Path
+    saved_path: Path | None
     params: GenerationParams
     prompt_id: str
     elapsed: float
-    comfy_filename: str = ""
+    comfy_file: dict[str, str]
 
 
 # --- Workflow handling --------------------------------------------------------
@@ -234,12 +236,14 @@ class ComfyClient:
         response.raise_for_status()
         return response.content
 
-    async def wait_for_completion(self, prompt_id: str, ws: Any, timeout: float) -> dict[str, Any]:
+    async def wait_for_completion(
+        self, prompt_id: str, ws: Any, timeout: float, on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
         """Wait via WebSocket if available, falling back to polling /history."""
         deadline = time.monotonic() + timeout
         if ws is not None:
             try:
-                await asyncio.wait_for(_wait_ws(ws, prompt_id), timeout)
+                await asyncio.wait_for(_wait_ws(ws, prompt_id, on_progress), timeout)
             except TimeoutError:
                 raise _timeout_error(timeout) from None
             except websockets.ConnectionClosed:
@@ -257,7 +261,7 @@ class ComfyClient:
             await asyncio.sleep(POLL_INTERVAL)
 
 
-async def _wait_ws(ws: Any, prompt_id: str) -> None:
+async def _wait_ws(ws: Any, prompt_id: str, on_progress: ProgressCallback | None) -> None:
     async for raw in ws:
         if isinstance(raw, bytes):  # binary preview frames
             continue
@@ -266,9 +270,11 @@ async def _wait_ws(ws: Any, prompt_id: str) -> None:
         if data.get("prompt_id") != prompt_id:
             continue
         kind = message.get("type")
-        if kind == "execution_error":
+        if kind == "progress" and on_progress is not None:
+            on_progress(int(data.get("value", 0)), int(data.get("max", 0)))
+        elif kind == "execution_error":
             raise GenerationFailedError(_describe_execution_error(data))
-        if kind == "execution_success" or (kind == "executing" and data.get("node") is None):
+        elif kind == "execution_success" or (kind == "executing" and data.get("node") is None):
             return
 
 
@@ -278,6 +284,29 @@ async def _open_ws(url: str) -> Any:
     except (OSError, websockets.WebSocketException, TimeoutError) as exc:
         log.warning("WebSocket unavailable (%s); will poll /history instead", exc)
         return None
+
+
+OUTPUT_DIR_FLAG = "--output-directory"
+
+
+def output_dir_from_argv(argv: list[str]) -> Path | None:
+    """Find ComfyUI's --output-directory in its launch arguments."""
+    for index, arg in enumerate(argv):
+        if arg == OUTPUT_DIR_FLAG and index + 1 < len(argv):
+            return Path(argv[index + 1])
+        if arg.startswith(OUTPUT_DIR_FLAG + "="):
+            return Path(arg.split("=", 1)[1])
+    return None
+
+
+async def get_output_dir(base_url: str) -> Path | None:
+    try:
+        async with httpx.AsyncClient(timeout=3) as http:
+            response = await http.get(f"{base_url}/system_stats")
+            response.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    return output_dir_from_argv(response.json().get("system", {}).get("argv", []))
 
 
 def _timeout_error(timeout: float) -> GenerationTimeoutError:
@@ -338,7 +367,12 @@ def save_output(output_dir: Path, image: bytes, metadata: dict[str, Any]) -> Pat
 # --- Entry point --------------------------------------------------------------
 
 
-async def generate(params: GenerationParams, settings: Settings) -> GenerationResult:
+async def generate(
+    params: GenerationParams,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+    save_copy: bool = True,
+) -> GenerationResult:
     """Run one txt2img generation end to end and save the result locally."""
     params.validate()
     params = params.with_seed()
@@ -350,7 +384,7 @@ async def generate(params: GenerationParams, settings: Settings) -> GenerationRe
         ws = await _open_ws(client.ws_url)  # connect before queueing so no events are missed
         try:
             prompt_id = await client.queue_prompt(workflow)
-            entry = await client.wait_for_completion(prompt_id, ws, settings.timeout)
+            entry = await client.wait_for_completion(prompt_id, ws, settings.timeout, on_progress)
         finally:
             if ws is not None:
                 await ws.close()
@@ -358,23 +392,25 @@ async def generate(params: GenerationParams, settings: Settings) -> GenerationRe
         image = await client.fetch_image(image_ref)
 
     elapsed = time.monotonic() - started
-    saved_path = save_output(
-        settings.output_dir,
-        image,
-        {
-            "params": asdict(params),
-            "prompt_id": prompt_id,
-            "comfyui_file": image_ref,
-            "workflow": str(settings.workflow_path),
-            "elapsed_seconds": round(elapsed, 2),
-            "created": datetime.now().isoformat(timespec="seconds"),
-        },
-    )
+    saved_path = None
+    if save_copy:
+        saved_path = save_output(
+            settings.output_dir,
+            image,
+            {
+                "params": asdict(params),
+                "prompt_id": prompt_id,
+                "comfyui_file": image_ref,
+                "workflow": str(settings.workflow_path),
+                "elapsed_seconds": round(elapsed, 2),
+                "created": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
     return GenerationResult(
         image=image,
         saved_path=saved_path,
         params=params,
         prompt_id=prompt_id,
         elapsed=elapsed,
-        comfy_filename=image_ref.get("filename", ""),
+        comfy_file=image_ref,
     )
