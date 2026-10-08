@@ -1,0 +1,380 @@
+"""ComfyUI client: workflow patching, queueing, waiting, and fetching results.
+
+Independent of MCP so it can be tested and reused directly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import logging
+import random
+import time
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+import websockets
+
+from config import Settings
+
+log = logging.getLogger(__name__)
+
+Workflow = dict[str, dict[str, Any]]
+
+MAX_SEED = 2**32 - 1
+POLL_INTERVAL = 1.0
+DEFAULT_NEGATIVE = "blurry, low quality, distorted, deformed, bad anatomy, text, watermark"
+
+
+# --- Errors -----------------------------------------------------------------
+
+
+class ComfyUIError(Exception):
+    """Base error; messages are written to be shown to the LLM as-is."""
+
+
+class ComfyUIUnavailableError(ComfyUIError):
+    pass
+
+
+class WorkflowError(ComfyUIError):
+    pass
+
+
+class GenerationTimeoutError(ComfyUIError):
+    pass
+
+
+class GenerationFailedError(ComfyUIError):
+    pass
+
+
+class InvalidParamsError(ComfyUIError):
+    pass
+
+
+# --- Parameters ---------------------------------------------------------------
+
+
+@dataclass
+class GenerationParams:
+    prompt: str
+    negative_prompt: str = DEFAULT_NEGATIVE
+    width: int = 512
+    height: int = 512
+    steps: int = 20
+    cfg: float = 8.0
+    seed: int | None = None
+
+    def validate(self) -> None:
+        problems: list[str] = []
+        if not self.prompt.strip():
+            problems.append("prompt must not be empty")
+        for name, value in (("width", self.width), ("height", self.height)):
+            if not 64 <= value <= 2048:
+                problems.append(f"{name} must be between 64 and 2048 (got {value})")
+            elif value % 8:
+                problems.append(f"{name} must be a multiple of 8 (got {value})")
+        if not 1 <= self.steps <= 150:
+            problems.append(f"steps must be between 1 and 150 (got {self.steps})")
+        if not 1.0 <= self.cfg <= 30.0:
+            problems.append(f"cfg must be between 1.0 and 30.0 (got {self.cfg})")
+        if self.seed is not None and not 0 <= self.seed <= MAX_SEED:
+            problems.append(f"seed must be between 0 and {MAX_SEED} (got {self.seed})")
+        if problems:
+            raise InvalidParamsError("Invalid parameters: " + "; ".join(problems) + ".")
+
+    def with_seed(self) -> GenerationParams:
+        """Return a copy with a concrete seed (random if none was given)."""
+        seed = self.seed if self.seed is not None else random.randint(0, MAX_SEED)
+        return GenerationParams(**{**asdict(self), "seed": seed})
+
+
+@dataclass
+class GenerationResult:
+    image: bytes
+    saved_path: Path
+    params: GenerationParams
+    prompt_id: str
+    elapsed: float
+    comfy_filename: str = ""
+
+
+# --- Workflow handling --------------------------------------------------------
+
+
+def load_workflow(path: Path) -> Workflow:
+    """Read the API-format workflow from disk. Each call returns a fresh object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise WorkflowError(f"Workflow file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise WorkflowError(f"Workflow file is not valid JSON ({path}): {exc}") from exc
+    if not isinstance(data, dict) or not all(
+        isinstance(node, dict) and "class_type" in node for node in data.values()
+    ):
+        raise WorkflowError(
+            f"{path.name} is not in ComfyUI API format. In ComfyUI use "
+            "Workflow > Export (API) to save it."
+        )
+    return data
+
+
+def find_nodes(workflow: Workflow, class_type: str) -> list[str]:
+    return [node_id for node_id, node in workflow.items() if node["class_type"] == class_type]
+
+
+def find_single_node(workflow: Workflow, class_type: str) -> str:
+    matches = find_nodes(workflow, class_type)
+    if len(matches) != 1:
+        raise WorkflowError(
+            f"Expected exactly one {class_type} node in the workflow, found {len(matches)}."
+        )
+    return matches[0]
+
+
+def linked_node(workflow: Workflow, node_id: str, input_name: str, expected_class: str) -> str:
+    """Follow `node_id`'s input link and check it points to a node of `expected_class`."""
+    link = workflow[node_id]["inputs"].get(input_name)
+    if not (isinstance(link, list) and len(link) == 2):
+        raise WorkflowError(f"Node {node_id} input '{input_name}' is not connected to a node.")
+    source_id = str(link[0])
+    source = workflow.get(source_id)
+    if source is None or source["class_type"] != expected_class:
+        found = source["class_type"] if source else "nothing"
+        raise WorkflowError(
+            f"KSampler '{input_name}' should come from a {expected_class} node, "
+            f"but is connected to {found} (node {source_id})."
+        )
+    return source_id
+
+
+@dataclass(frozen=True)
+class NodeRoles:
+    sampler: str
+    positive: str
+    negative: str
+    latent: str
+    save: str
+
+
+def identify_nodes(workflow: Workflow) -> NodeRoles:
+    sampler = find_single_node(workflow, "KSampler")
+    positive = linked_node(workflow, sampler, "positive", "CLIPTextEncode")
+    negative = linked_node(workflow, sampler, "negative", "CLIPTextEncode")
+    if positive == negative:
+        raise WorkflowError("KSampler positive and negative use the same CLIPTextEncode node.")
+    latent = find_single_node(workflow, "EmptyLatentImage")
+    save = find_single_node(workflow, "SaveImage")
+    return NodeRoles(sampler, positive, negative, latent, save)
+
+
+def apply_params(template: Workflow, params: GenerationParams) -> tuple[Workflow, NodeRoles]:
+    """Return a patched deep copy of `template`; the template is never mutated."""
+    workflow = copy.deepcopy(template)
+    roles = identify_nodes(workflow)
+    workflow[roles.positive]["inputs"]["text"] = params.prompt
+    workflow[roles.negative]["inputs"]["text"] = params.negative_prompt
+    workflow[roles.latent]["inputs"].update(width=params.width, height=params.height)
+    workflow[roles.sampler]["inputs"].update(steps=params.steps, cfg=params.cfg, seed=params.seed)
+    return workflow, roles
+
+
+# --- ComfyUI HTTP / WebSocket client ------------------------------------------
+
+
+class ComfyClient:
+    def __init__(self, base_url: str, http: httpx.AsyncClient) -> None:
+        self.base_url = base_url
+        self.http = http
+        self.client_id = uuid.uuid4().hex
+
+    @property
+    def ws_url(self) -> str:
+        parsed = urlparse(self.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        return f"{scheme}://{parsed.netloc}/ws?clientId={self.client_id}"
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return await self.http.request(method, f"{self.base_url}{path}", **kwargs)
+        except httpx.ConnectError as exc:
+            raise ComfyUIUnavailableError(
+                f"Cannot connect to ComfyUI at {self.base_url}. Is ComfyUI running?"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise ComfyUIUnavailableError(
+                f"ComfyUI at {self.base_url} did not respond in time ({path})."
+            ) from exc
+
+    async def queue_prompt(self, workflow: Workflow) -> str:
+        response = await self._request(
+            "POST", "/prompt", json={"prompt": workflow, "client_id": self.client_id}
+        )
+        if response.status_code == 400:
+            raise WorkflowError("ComfyUI rejected the workflow: " + _describe_rejection(response))
+        response.raise_for_status()
+        return response.json()["prompt_id"]
+
+    async def get_history(self, prompt_id: str) -> dict[str, Any] | None:
+        response = await self._request("GET", f"/history/{prompt_id}")
+        response.raise_for_status()
+        return response.json().get(prompt_id)
+
+    async def fetch_image(self, image_ref: dict[str, str]) -> bytes:
+        params = {k: image_ref.get(k, "") for k in ("filename", "subfolder", "type")}
+        response = await self._request("GET", "/view", params=params)
+        response.raise_for_status()
+        return response.content
+
+    async def wait_for_completion(self, prompt_id: str, ws: Any, timeout: float) -> dict[str, Any]:
+        """Wait via WebSocket if available, falling back to polling /history."""
+        deadline = time.monotonic() + timeout
+        if ws is not None:
+            try:
+                await asyncio.wait_for(_wait_ws(ws, prompt_id), timeout)
+            except TimeoutError:
+                raise _timeout_error(timeout) from None
+            except websockets.ConnectionClosed:
+                log.warning("WebSocket closed early; falling back to polling /history")
+        return await self._poll_history(prompt_id, deadline, timeout)
+
+    async def _poll_history(self, prompt_id: str, deadline: float, timeout: float) -> dict[str, Any]:
+        while True:
+            entry = await self.get_history(prompt_id)
+            if entry and entry.get("status", {}).get("completed") is not None:
+                if entry["status"].get("status_str") == "error" or entry.get("outputs"):
+                    return entry
+            if time.monotonic() >= deadline:
+                raise _timeout_error(timeout)
+            await asyncio.sleep(POLL_INTERVAL)
+
+
+async def _wait_ws(ws: Any, prompt_id: str) -> None:
+    async for raw in ws:
+        if isinstance(raw, bytes):  # binary preview frames
+            continue
+        message = json.loads(raw)
+        data = message.get("data", {})
+        if data.get("prompt_id") != prompt_id:
+            continue
+        kind = message.get("type")
+        if kind == "execution_error":
+            raise GenerationFailedError(_describe_execution_error(data))
+        if kind == "execution_success" or (kind == "executing" and data.get("node") is None):
+            return
+
+
+async def _open_ws(url: str) -> Any:
+    try:
+        return await websockets.connect(url, max_size=None, open_timeout=5)
+    except (OSError, websockets.WebSocketException, TimeoutError) as exc:
+        log.warning("WebSocket unavailable (%s); will poll /history instead", exc)
+        return None
+
+
+def _timeout_error(timeout: float) -> GenerationTimeoutError:
+    return GenerationTimeoutError(
+        f"Image generation did not finish within {timeout:.0f}s. ComfyUI may be busy "
+        "or the model is still loading; try again, or lower steps/size."
+    )
+
+
+def _describe_rejection(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:500]
+    parts = [body.get("error", {}).get("message", "unknown error")]
+    for node_id, node_err in body.get("node_errors", {}).items():
+        for err in node_err.get("errors", []):
+            parts.append(f"node {node_id} ({node_err.get('class_type')}): {err.get('details') or err.get('message')}")
+    return "; ".join(parts)
+
+
+def _describe_execution_error(data: dict[str, Any]) -> str:
+    return (
+        f"ComfyUI failed while running {data.get('node_type', 'a node')} "
+        f"(node {data.get('node_id')}): {data.get('exception_message', '').strip()}"
+    )
+
+
+def _first_image(entry: dict[str, Any], preferred_node: str) -> dict[str, str]:
+    status = entry.get("status", {})
+    if status.get("status_str") == "error":
+        for name, data in status.get("messages", []):
+            if name == "execution_error":
+                raise GenerationFailedError(_describe_execution_error(data))
+        raise GenerationFailedError("ComfyUI reported an error while generating the image.")
+    outputs = entry.get("outputs", {})
+    ordered = [preferred_node, *(k for k in outputs if k != preferred_node)]
+    for node_id in ordered:
+        images = outputs.get(node_id, {}).get("images", [])
+        if images:
+            return images[0]
+    raise GenerationFailedError("ComfyUI finished but produced no output image.")
+
+
+# --- Saving -------------------------------------------------------------------
+
+
+def save_output(output_dir: Path, image: bytes, metadata: dict[str, Any]) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{datetime.now():%Y%m%d-%H%M%S}_{metadata['params']['seed']}"
+    image_path = output_dir / f"{stem}.png"
+    image_path.write_bytes(image)
+    sidecar = {**metadata, "image": image_path.name}
+    image_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    return image_path
+
+
+# --- Entry point --------------------------------------------------------------
+
+
+async def generate(params: GenerationParams, settings: Settings) -> GenerationResult:
+    """Run one txt2img generation end to end and save the result locally."""
+    params.validate()
+    params = params.with_seed()
+    workflow, roles = apply_params(load_workflow(settings.workflow_path), params)
+    started = time.monotonic()
+
+    async with httpx.AsyncClient(timeout=30) as http:
+        client = ComfyClient(settings.comfyui_url, http)
+        ws = await _open_ws(client.ws_url)  # connect before queueing so no events are missed
+        try:
+            prompt_id = await client.queue_prompt(workflow)
+            entry = await client.wait_for_completion(prompt_id, ws, settings.timeout)
+        finally:
+            if ws is not None:
+                await ws.close()
+        image_ref = _first_image(entry, roles.save)
+        image = await client.fetch_image(image_ref)
+
+    elapsed = time.monotonic() - started
+    saved_path = save_output(
+        settings.output_dir,
+        image,
+        {
+            "params": asdict(params),
+            "prompt_id": prompt_id,
+            "comfyui_file": image_ref,
+            "workflow": str(settings.workflow_path),
+            "elapsed_seconds": round(elapsed, 2),
+            "created": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    return GenerationResult(
+        image=image,
+        saved_path=saved_path,
+        params=params,
+        prompt_id=prompt_id,
+        elapsed=elapsed,
+        comfy_filename=image_ref.get("filename", ""),
+    )

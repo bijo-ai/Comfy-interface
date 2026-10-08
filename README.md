@@ -1,0 +1,169 @@
+# comfyui-mcp
+
+A local MCP server that lets an LLM in **LM Studio** generate images with your local **ComfyUI**.
+It exposes one tool:
+
+```
+generate_image(prompt, negative_prompt="blurry, low quality, ...", width=512, height=512,
+               steps=20, cfg=8.0, seed=None)
+```
+
+The tool returns the PNG as MCP image content plus a short text summary (seed, size, steps, saved path).
+Every image is also saved to `outputs/`, alongside a `.json` sidecar that records the parameters used.
+
+```
+LM Studio ──MCP (stdio or HTTP)──> server.py ──> comfy_client.py ──HTTP/WebSocket──> ComfyUI :8188
+```
+
+| File | Role |
+|---|---|
+| `server.py` | MCP layer: tool definition, transports, error → tool-error mapping |
+| `comfy_client.py` | ComfyUI logic: load + patch workflow, queue, wait, fetch, save. No MCP imports |
+| `config.py` | Reads settings from `.env` |
+| `workflow_api.json` | The ComfyUI graph, in **API format** |
+| `test_generate.py` | End-to-end test of the generation logic (no MCP) |
+| `check_mcp.py` | Minimal MCP client: lists tools and optionally calls `generate_image` |
+
+## Setup (Windows)
+
+Requires [uv](https://docs.astral.sh/uv/) and ComfyUI running at `http://127.0.0.1:8188`
+with the `v1-5-pruned-emaonly.safetensors` checkpoint installed.
+
+```powershell
+cd C:\Users\appua\comfyui-mcp
+uv sync                      # creates .venv with Python 3.12 + dependencies
+copy .env.example .env       # then edit if needed
+uv run python test_generate.py
+```
+
+> On this machine AVG's HTTPS scanning can break package downloads. If `uv sync` fails with a
+> certificate error, run `$env:UV_NATIVE_TLS=1; uv sync` so uv uses the Windows certificate store.
+
+### `.env`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI base URL |
+| `WORKFLOW_PATH` | `workflow_api.json` | API-format workflow (relative paths resolve from this folder) |
+| `OUTPUT_DIR` | `outputs` | Where PNGs and JSON sidecars are written |
+| `TIMEOUT` | `180` | Seconds to wait for a generation before giving up |
+
+Real environment variables take precedence over `.env`.
+
+## Exporting a workflow in API format
+
+The server needs the **API** format. That is a flat `{"node_id": {"class_type": ..., "inputs": ...}}` map,
+not the regular UI save, which contains `"nodes"` and `"links"`.
+
+1. Open your workflow in ComfyUI and check it runs with **Run**.
+2. Open the **Workflow** menu (top-left ComfyUI logo, then **File**) and choose **Export (API)**.
+   - On older frontends, first enable **Settings → Comfy → Dev mode** ("Enable dev mode options").
+     Then use the **Save (API Format)** button.
+3. Save the file as `workflow_api.json` in this folder, or point `WORKFLOW_PATH` at it.
+
+Nodes are located by `class_type`, not by ID, so any export works as long as it has:
+exactly one `KSampler`, whose `positive` and `negative` inputs connect directly to `CLIPTextEncode` nodes;
+one `EmptyLatentImage`; and one `SaveImage`. The positive and negative encoders are found by following
+the KSampler's links, so node order and titles don't matter. Sampler, scheduler and checkpoint come
+from the workflow file itself.
+
+## Running the server
+
+```powershell
+# stdio (LM Studio launches it for you; you normally don't run this by hand)
+uv run python server.py
+
+# streamable HTTP, served at http://127.0.0.1:8000/mcp
+uv run python server.py --transport http --port 8000
+```
+
+`--host` defaults to `127.0.0.1`. Keep it that way unless you mean to expose the server on your network.
+
+### Verifying it
+
+```powershell
+uv run python check_mcp.py stdio                  # spawn over stdio, list tools
+uv run python check_mcp.py stdio --bad --call     # also test validation + a real generation
+uv run python check_mcp.py http http://127.0.0.1:8000/mcp --call   # against a running HTTP server
+```
+
+You can also use the MCP Inspector (needs Node.js):
+`npx @modelcontextprotocol/inspector C:\Users\appua\comfyui-mcp\.venv\Scripts\python.exe C:\Users\appua\comfyui-mcp\server.py`
+
+## LM Studio configuration
+
+In LM Studio, open **Program** (right sidebar) → **Install** → **Edit mcp.json**, then add one of these.
+
+### stdio (recommended)
+
+LM Studio starts and stops the server itself. The venv's Python is called directly, so this works
+even when `uv` isn't on LM Studio's PATH.
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "command": "C:\\Users\\appua\\comfyui-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\appua\\comfyui-mcp\\server.py"]
+    }
+  }
+}
+```
+
+Settings come from `.env`. To override one here, add an `"env"` block, e.g.
+`"env": { "TIMEOUT": "300" }`.
+
+### Streamable HTTP
+
+First start the server yourself (`uv run python server.py --transport http --port 8000`) and leave it running:
+
+```json
+{
+  "mcpServers": {
+    "comfyui": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+## Model requirements
+
+**The LM Studio model must support tool calling.** In LM Studio's model list these models show a
+hammer/"Tool use" badge. Models that work well:
+
+- Qwen3 (4B / 8B / 14B), or Qwen2.5 7B/14B Instruct
+- Llama 3.1 8B Instruct / Llama 3.2 3B Instruct
+- Mistral Nemo Instruct, Ministral 8B, Mistral Small
+- gpt-oss-20b
+
+Without tool-calling support the model just writes text and never calls `generate_image`.
+Non-vision models can't see the returned image, but they still get the text summary with the seed and saved path.
+
+ComfyUI and the LLM share your GPU (6 GB on an RTX 4050 laptop). A 4B–8B quantised model
+(Q4) leaves room for SD 1.5. If generations time out or fail with out-of-memory errors, use a smaller
+model, or offload some of its layers to the CPU in LM Studio.
+
+## Errors returned to the LLM
+
+The server never crashes on a failed generation. The tool returns an error result with a readable message instead:
+
+| Situation | Message |
+|---|---|
+| ComfyUI not running | `Cannot connect to ComfyUI at http://127.0.0.1:8188. Is ComfyUI running?` |
+| Bad arguments | `Invalid parameters: width must be a multiple of 8 (got 500); ...` |
+| UI-format / missing / broken workflow | `... is not in ComfyUI API format. In ComfyUI use Workflow > Export (API) ...` |
+| ComfyUI rejects graph (e.g. missing model) | `ComfyUI rejected the workflow: ... ckpt_name: 'x' not in [...]` |
+| Too slow | `Image generation did not finish within 180s. ...` |
+
+Validation limits: width/height 64–2048 and multiples of 8, steps 1–150, cfg 1.0–30.0, seed 0–4294967295.
+
+## How a call works
+
+1. `workflow_api.json` is read fresh, then patched on a deep copy; the file on disk is never changed.
+2. The server opens a WebSocket to `/ws?clientId=...` *before* queueing, so no progress events are missed.
+3. It POSTs `{"prompt": workflow, "client_id": ...}` to `/prompt`.
+4. It waits for `execution_success`, or for `executing` with `node: null`. If the WebSocket can't connect
+   or drops, it polls `/history/{prompt_id}` once per second until the timeout.
+5. It reads the SaveImage output from history, downloads it through `/view`, saves it to `outputs/`
+   with a sidecar, and returns it.
