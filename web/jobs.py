@@ -8,11 +8,11 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from comfy_client import ComfyUIError, GenerationParams, ProgressCallback
+from comfy_client import ComfyUIError, GenerationParams, PreviewCallback, ProgressCallback
 
 log = logging.getLogger(__name__)
 
-Runner = Callable[[GenerationParams, ProgressCallback], Awaitable[dict[str, Any]]]
+Runner = Callable[[GenerationParams, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20
 
 
@@ -25,6 +25,7 @@ class Job:
         self.id = job_id
         self.events: list[dict[str, Any]] = []
         self.done = False
+        self.preview: bytes | None = None  # latest live preview frame; not part of the event log
         self.task: asyncio.Task[None] | None = None
         self._changed = asyncio.Event()
 
@@ -67,10 +68,13 @@ class JobManager:
 
     async def _run(self, job: Job, params: GenerationParams) -> None:
         def on_progress(step: int, total: int) -> None:
-            job.emit({"type": "progress", "step": step, "total": total})
+            job.emit({"type": "progress", "step": step, "total": total, "preview": job.preview is not None})
+
+        def on_preview(image: bytes) -> None:
+            job.preview = image
 
         try:
-            payload = await self._runner(params, on_progress)
+            payload = await self._runner(params, on_progress, on_preview)
             job.emit({"type": "done", **payload}, final=True)
         except ComfyUIError as exc:
             job.emit({"type": "error", "message": str(exc)}, final=True)

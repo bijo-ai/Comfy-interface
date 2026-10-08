@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import random
+import struct
 import time
 import uuid
 from collections.abc import Callable
@@ -28,6 +29,7 @@ log = logging.getLogger(__name__)
 
 Workflow = dict[str, dict[str, Any]]
 ProgressCallback = Callable[[int, int], None]
+PreviewCallback = Callable[[bytes], None]
 
 MAX_SEED = 2**32 - 1
 POLL_INTERVAL = 1.0
@@ -216,10 +218,11 @@ class ComfyClient:
                 f"ComfyUI at {self.base_url} did not respond in time ({path})."
             ) from exc
 
-    async def queue_prompt(self, workflow: Workflow) -> str:
-        response = await self._request(
-            "POST", "/prompt", json={"prompt": workflow, "client_id": self.client_id}
-        )
+    async def queue_prompt(self, workflow: Workflow, previews: bool = False) -> str:
+        payload: dict[str, Any] = {"prompt": workflow, "client_id": self.client_id}
+        if previews:  # per-prompt override; ComfyUI's own preview setting stays untouched
+            payload["extra_data"] = {"preview_method": PREVIEW_METHOD}
+        response = await self._request("POST", "/prompt", json=payload)
         if response.status_code == 400:
             raise WorkflowError("ComfyUI rejected the workflow: " + _describe_rejection(response))
         response.raise_for_status()
@@ -237,13 +240,14 @@ class ComfyClient:
         return response.content
 
     async def wait_for_completion(
-        self, prompt_id: str, ws: Any, timeout: float, on_progress: ProgressCallback | None = None
+        self, prompt_id: str, ws: Any, timeout: float, on_progress: ProgressCallback | None = None,
+        on_preview: PreviewCallback | None = None,
     ) -> dict[str, Any]:
         """Wait via WebSocket if available, falling back to polling /history."""
         deadline = time.monotonic() + timeout
         if ws is not None:
             try:
-                await asyncio.wait_for(_wait_ws(ws, prompt_id, on_progress), timeout)
+                await asyncio.wait_for(_wait_ws(ws, prompt_id, on_progress, on_preview), timeout)
             except TimeoutError:
                 raise _timeout_error(timeout) from None
             except websockets.ConnectionClosed:
@@ -261,9 +265,13 @@ class ComfyClient:
             await asyncio.sleep(POLL_INTERVAL)
 
 
-async def _wait_ws(ws: Any, prompt_id: str, on_progress: ProgressCallback | None) -> None:
+async def _wait_ws(
+    ws: Any, prompt_id: str, on_progress: ProgressCallback | None, on_preview: PreviewCallback | None = None
+) -> None:
     async for raw in ws:
         if isinstance(raw, bytes):  # binary preview frames
+            if on_preview is not None and (image := decode_preview(raw, prompt_id)) is not None:
+                on_preview(image)
             continue
         message = json.loads(raw)
         data = message.get("data", {})
@@ -284,6 +292,29 @@ async def _open_ws(url: str) -> Any:
     except (OSError, websockets.WebSocketException, TimeoutError) as exc:
         log.warning("WebSocket unavailable (%s); will poll /history instead", exc)
         return None
+
+
+PREVIEW_METHOD = "latent2rgb"  # built into ComfyUI, no extra model needed
+PREVIEW_IMAGE = 1  # ComfyUI BinaryEventTypes
+PREVIEW_IMAGE_WITH_METADATA = 4
+
+
+def decode_preview(frame: bytes, prompt_id: str) -> bytes | None:
+    """Return the image bytes of a ComfyUI binary preview frame, or None for other frames."""
+    if len(frame) < 8:
+        return None
+    event, header = struct.unpack(">II", frame[:8])
+    if event == PREVIEW_IMAGE:  # header is the image type (1 JPEG, 2 PNG)
+        return frame[8:]
+    if event == PREVIEW_IMAGE_WITH_METADATA:  # header is the metadata JSON length
+        try:
+            metadata = json.loads(frame[8 : 8 + header])
+        except ValueError:
+            return None
+        if metadata.get("prompt_id", prompt_id) != prompt_id:
+            return None
+        return frame[8 + header :]
+    return None
 
 
 OUTPUT_DIR_FLAG = "--output-directory"
@@ -372,6 +403,7 @@ async def generate(
     settings: Settings,
     on_progress: ProgressCallback | None = None,
     save_copy: bool = True,
+    on_preview: PreviewCallback | None = None,
 ) -> GenerationResult:
     """Run one txt2img generation end to end and save the result locally."""
     params.validate()
@@ -383,8 +415,8 @@ async def generate(
         client = ComfyClient(settings.comfyui_url, http)
         ws = await _open_ws(client.ws_url)  # connect before queueing so no events are missed
         try:
-            prompt_id = await client.queue_prompt(workflow)
-            entry = await client.wait_for_completion(prompt_id, ws, settings.timeout, on_progress)
+            prompt_id = await client.queue_prompt(workflow, previews=on_preview is not None)
+            entry = await client.wait_for_completion(prompt_id, ws, settings.timeout, on_progress, on_preview)
         finally:
             if ws is not None:
                 await ws.close()

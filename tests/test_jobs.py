@@ -15,7 +15,7 @@ async def collect(job) -> list[dict]:
 
 
 def test_progress_then_done() -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         on_progress(1, 2)
         await asyncio.sleep(0)
         on_progress(2, 2)
@@ -26,14 +26,14 @@ def test_progress_then_done() -> None:
         return await collect(job)
 
     assert asyncio.run(scenario()) == [
-        {"type": "progress", "step": 1, "total": 2},
-        {"type": "progress", "step": 2, "total": 2},
+        {"type": "progress", "step": 1, "total": 2, "preview": False},
+        {"type": "progress", "step": 2, "total": 2, "preview": False},
         {"type": "done", "seed": 5},
     ]
 
 
 def test_comfy_error_becomes_error_event() -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         raise ComfyUIUnavailableError("Cannot connect to ComfyUI")
 
     async def scenario():
@@ -43,7 +43,7 @@ def test_comfy_error_becomes_error_event() -> None:
 
 
 def test_unexpected_error_becomes_error_event() -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         raise RuntimeError("boom")
 
     async def scenario():
@@ -54,7 +54,7 @@ def test_unexpected_error_becomes_error_event() -> None:
 
 
 def test_busy_while_running_then_free() -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         await asyncio.sleep(0.05)
         return {}
 
@@ -70,7 +70,7 @@ def test_busy_while_running_then_free() -> None:
 
 
 def test_late_subscriber_gets_replay() -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         on_progress(1, 1)
         return {"seed": 1}
 
@@ -82,3 +82,20 @@ def test_late_subscriber_gets_replay() -> None:
         return await collect(job)  # subscribe again after completion
 
     assert [e["type"] for e in asyncio.run(scenario())] == ["progress", "done"]
+
+
+def test_preview_is_kept_and_flagged_on_progress() -> None:
+    async def runner(params, on_progress, on_preview):
+        on_progress(1, 2)
+        on_preview(b"jpeg-1")
+        on_progress(2, 2)
+        return {}
+
+    async def scenario():
+        job = JobManager(runner).start(PARAMS)
+        events = await collect(job)
+        return job, events
+
+    job, events = asyncio.run(scenario())
+    assert job.preview == b"jpeg-1"
+    assert [e.get("preview") for e in events if e["type"] == "progress"] == [False, True]

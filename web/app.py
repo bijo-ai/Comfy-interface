@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,6 +21,7 @@ from comfy_client import (
     DEFAULT_NEGATIVE,
     GenerationParams,
     InvalidParamsError,
+    PreviewCallback,
     ProgressCallback,
     generate,
     get_output_dir,
@@ -36,6 +37,7 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]  # blocks DNS-rebinding pages from reaching the API
 MAX_PAGE = 200
+PNG_SIGNATURE = bytes([0x89]) + b"PNG"
 NO_GALLERY = (
     "ComfyUI's output folder is unknown. Start ComfyUI, or set COMFYUI_OUTPUT_DIR in .env."
 )
@@ -80,8 +82,10 @@ def comfy_name(comfy_file: dict[str, str]) -> str:
 
 
 def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
-    async def run(params: GenerationParams, on_progress: ProgressCallback) -> dict[str, Any]:
-        result = await generate(params, settings, on_progress=on_progress, save_copy=False)
+    async def run(
+        params: GenerationParams, on_progress: ProgressCallback, on_preview: PreviewCallback
+    ) -> dict[str, Any]:
+        result = await generate(params, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
         image = None
         if gallery is not None:
@@ -187,6 +191,14 @@ def create_app(
                 yield f"data: {json.dumps(event)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/jobs/{job_id}/preview")
+    async def job_preview(job_id: str) -> Response:
+        job = jobs.get(job_id)
+        if job is None or job.preview is None:
+            raise ApiError(404, "No preview yet.")
+        media_type = "image/png" if job.preview.startswith(PNG_SIGNATURE) else "image/jpeg"
+        return Response(job.preview, media_type=media_type, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/images")
     async def list_images(offset: int = 0, limit: int = 60) -> dict[str, Any]:

@@ -9,6 +9,7 @@ const els = {
   generate: $("#generate"), generateLabel: $(".generate-label"), generateFill: $(".generate-fill"),
   shapes: [...document.querySelectorAll(".shape")],
   stageImg: $("#stage-img"), stageEmpty: $("#stage-empty"), stageCaption: $("#stage-caption"),
+  live: $("#stage-live"), liveCanvas: $("#stage-canvas"),
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
 };
@@ -101,6 +102,78 @@ function setProgress(step, total) {
   els.generateFill.style.transform = `scaleX(${total ? step / total : 0})`;
 }
 
+// --- live preview ----------------------------------------------------------
+// While generating, the stage shows ComfyUI's per-step previews as chunky pixels that get finer each step.
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const LIVE_COLS_START = 14;
+const LIVE_COLS_END = 110;
+const NOISE_FRAME_MS = 110;
+const live = { aspect: 1, noiseTimer: null, latestStep: 0 };
+
+function liveGrid(fraction) {
+  const cols = Math.round(LIVE_COLS_START + (LIVE_COLS_END - LIVE_COLS_START) * fraction ** 1.6);
+  return [cols, Math.max(1, Math.round(cols / live.aspect))];
+}
+
+function drawNoise() {
+  const [cols, rows] = liveGrid(0);
+  const canvas = els.liveCanvas;
+  canvas.width = cols;
+  canvas.height = rows;
+  const ctx = canvas.getContext("2d");
+  const pixels = ctx.createImageData(cols, rows);
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const v = 14 + Math.random() * 34;
+    const warm = Math.random() < 0.06; // occasional amber sparkle
+    pixels.data[i] = warm ? 150 + Math.random() * 90 : v;
+    pixels.data[i + 1] = warm ? 100 + Math.random() * 60 : v;
+    pixels.data[i + 2] = warm ? 30 : v + 6;
+    pixels.data[i + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
+}
+
+function startLive(width, height) {
+  live.aspect = width / height;
+  live.latestStep = 0;
+  els.live.style.setProperty("--aspect", String(live.aspect));
+  els.stageImg.hidden = true;
+  els.stageEmpty.hidden = true;
+  els.live.hidden = false;
+  els.stageCaption.textContent = "Warming up…";
+  drawNoise();
+  if (!reducedMotion.matches) live.noiseTimer = setInterval(drawNoise, NOISE_FRAME_MS);
+}
+
+function stopNoise() {
+  clearInterval(live.noiseTimer);
+  live.noiseTimer = null;
+}
+
+function stopLive() {
+  stopNoise();
+  els.live.hidden = true;
+}
+
+function showLivePreview(jobId, step, total) {
+  live.latestStep = step;
+  const frame = new Image();
+  frame.onload = () => {
+    if (step !== live.latestStep || els.live.hidden) return; // a newer frame is on its way
+    stopNoise();
+    const [cols, rows] = liveGrid(total ? step / total : 1);
+    const canvas = els.liveCanvas;
+    canvas.width = cols;
+    canvas.height = rows;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true; // average each block, then display it with hard edges
+    ctx.drawImage(frame, 0, 0, cols, rows);
+  };
+  frame.src = `/api/jobs/${jobId}/preview?step=${step}`;
+  els.stageCaption.textContent = `Forming · step ${step} / ${total}`;
+}
+
 // --- generation ------------------------------------------------------------
 
 function followJob(jobId) {
@@ -110,6 +183,7 @@ function followJob(jobId) {
       const event = JSON.parse(message.data);
       if (event.type === "progress") {
         setProgress(event.step, event.total);
+        if (event.preview) showLivePreview(jobId, event.step, event.total);
       } else if (event.type === "done") {
         source.close();
         resolve(event);
@@ -133,6 +207,7 @@ async function generate(params) {
     return;
   }
   setBusy(true);
+  startLive(params.width, params.height);
   try {
     const { job_id: jobId } = await api("/api/generate", {
       method: "POST",
@@ -142,34 +217,42 @@ async function generate(params) {
     onGenerated(await followJob(jobId));
   } catch (error) {
     toast(error.message, "error");
+    restoreStage();
   } finally {
+    stopLive();
     setBusy(false);
   }
+}
+
+function restoreStage() {
+  const current = state.images.find((image) => image.name === state.stageName);
+  current ? showOnStage(current, "Latest") : clearStage();
 }
 
 function onGenerated(event) {
   if (!event.image) {
     toast("The image was generated but couldn't be found in ComfyUI's output folder.", "error");
+    restoreStage();
     return;
   }
   state.images.unshift(event.image);
   state.total += 1;
   renderGallery();
-  showOnStage(event.image, `Seed ${event.seed} · ${event.elapsed}s`);
+  showOnStage(event.image, `Seed ${event.seed} · ${event.elapsed}s`, "from-live");
 }
 
 // --- stage -----------------------------------------------------------------
 
-function showOnStage(image, caption) {
+function showOnStage(image, caption, animation = "reveal") {
   state.stageName = image.name;
   els.stageImg.src = imageUrl(image.name);
   els.stageImg.alt = image.params?.prompt ?? image.name;
   els.stageImg.hidden = false;
   els.stageEmpty.hidden = true;
   els.stageCaption.textContent = caption;
-  els.stageImg.classList.remove("reveal");
+  els.stageImg.classList.remove("reveal", "from-live");
   void els.stageImg.offsetWidth; // restart the animation
-  els.stageImg.classList.add("reveal");
+  els.stageImg.classList.add(animation);
 }
 
 function clearStage() {

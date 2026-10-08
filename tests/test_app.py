@@ -17,7 +17,7 @@ from web.app import GalleryProvider, create_app
 BASE_URL = "http://127.0.0.1"
 
 
-async def quick_runner(params, on_progress):
+async def quick_runner(params, on_progress, on_preview=None):
     on_progress(1, 2)
     on_progress(2, 2)
     return {"image": None, "seed": 7, "elapsed": 0.1}
@@ -48,8 +48,8 @@ def test_status_reports_offline_comfyui(client, settings) -> None:
 def test_generate_streams_progress_then_done(client) -> None:
     job_id = client.post("/api/generate", json={"prompt": "a fox"}).json()["job_id"]
     assert sse_events(client, job_id) == [
-        {"type": "progress", "step": 1, "total": 2},
-        {"type": "progress", "step": 2, "total": 2},
+        {"type": "progress", "step": 1, "total": 2, "preview": False},
+        {"type": "progress", "step": 2, "total": 2, "preview": False},
         {"type": "done", "image": None, "seed": 7, "elapsed": 0.1},
     ]
 
@@ -69,7 +69,7 @@ def test_generate_rejects_bad_params(client) -> None:
 
 
 def test_generate_busy_returns_409(settings) -> None:
-    async def slow_runner(params, on_progress):
+    async def slow_runner(params, on_progress, on_preview=None):
         await asyncio.sleep(0.5)
         return {"image": None, "seed": 1, "elapsed": 0.5}
 
@@ -80,7 +80,7 @@ def test_generate_busy_returns_409(settings) -> None:
 
 
 def test_runner_error_is_streamed(settings) -> None:
-    async def failing_runner(params, on_progress):
+    async def failing_runner(params, on_progress, on_preview=None):
         raise ComfyUIUnavailableError("Cannot connect to ComfyUI at x. Is ComfyUI running?")
 
     with TestClient(create_app(settings, runner=failing_runner), base_url=BASE_URL) as client:
@@ -155,3 +155,26 @@ def test_gallery_provider_recovers_when_comfyui_starts(settings, monkeypatch, tm
 def test_foreign_host_header_rejected(settings) -> None:
     with TestClient(create_app(settings, runner=quick_runner), base_url="http://evil.example") as client:
         assert client.get("/api/images").status_code == 400
+
+
+def test_job_preview_endpoint(settings) -> None:
+    async def previewing_runner(params, on_progress, on_preview):
+        on_preview(b"\xff\xd8\xff\xe0preview")
+        on_progress(1, 1)
+        return {"image": None, "seed": 1, "elapsed": 0.1}
+
+    with TestClient(create_app(settings, runner=previewing_runner), base_url=BASE_URL) as client:
+        job_id = client.post("/api/generate", json={"prompt": "a"}).json()["job_id"]
+        sse_events(client, job_id)
+        response = client.get(f"/api/jobs/{job_id}/preview")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.content == b"\xff\xd8\xff\xe0preview"
+        assert client.get("/api/jobs/nope/preview").status_code == 404
+
+
+def test_job_preview_404_before_first_frame(client) -> None:
+    job_id = client.post("/api/generate", json={"prompt": "a"}).json()["job_id"]
+    sse_events(client, job_id)
+    assert client.get(f"/api/jobs/{job_id}/preview").status_code == 404

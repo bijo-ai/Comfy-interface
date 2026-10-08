@@ -54,7 +54,7 @@ def make_bot(tmp_path: Path, runner, allowed: int | None = USER) -> StudioBot:
 
 
 def done_runner(seen: list[GenerationParams]):
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         seen.append(params)
         for step in range(1, 21):
             on_progress(step, 20)
@@ -166,7 +166,7 @@ def test_expired_vary(tmp_path) -> None:
 
 
 def test_busy_reply(tmp_path) -> None:
-    async def slow_runner(params, on_progress):
+    async def slow_runner(params, on_progress, on_preview=None):
         await asyncio.sleep(0.2)
         return {"image": None, "seed": 1, "elapsed": 0.2}
 
@@ -182,7 +182,7 @@ def test_busy_reply(tmp_path) -> None:
 
 
 def test_error_event_edits_status(tmp_path) -> None:
-    async def failing_runner(params, on_progress):
+    async def failing_runner(params, on_progress, on_preview=None):
         raise ComfyUIUnavailableError("Cannot connect to ComfyUI. Is ComfyUI running?")
 
     chat = FakeChat()
@@ -192,7 +192,7 @@ def test_error_event_edits_status(tmp_path) -> None:
 
 
 def test_missing_image_reported(tmp_path) -> None:
-    async def runner(params, on_progress):
+    async def runner(params, on_progress, on_preview=None):
         return {"image": None, "seed": 1, "elapsed": 1.0}
 
     chat = FakeChat()
