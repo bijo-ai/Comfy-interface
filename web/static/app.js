@@ -18,7 +18,7 @@ const lb = {
   remove: $("#lb-delete"), confirm: $("#lb-confirm"), confirmYes: $("#lb-confirm-yes"), confirmNo: $("#lb-confirm-no"),
   prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"),
 };
-const state = { images: [], total: 0, busy: false, current: -1, stageName: null, galleryUnavailable: false };
+const state = { images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false };
 
 // --- helpers ---------------------------------------------------------------
 
@@ -238,8 +238,13 @@ function metaRows(image) {
   });
 }
 
+// The lightbox tracks its image by name: generations and deletes shift positions in state.images.
+const currentIndex = () => state.images.findIndex((image) => image.name === state.currentName);
+const currentImage = () => state.images[currentIndex()];
+
 function renderLightbox() {
-  const image = state.images[state.current];
+  const index = currentIndex();
+  const image = state.images[index];
   const params = image.params;
   lb.img.src = imageUrl(image.name);
   lb.img.alt = params?.prompt ?? image.name;
@@ -252,34 +257,38 @@ function renderLightbox() {
     button.title = params ? "" : "Settings unavailable for this image";
   }
   lb.download.href = `${imageUrl(image.name)}?download=1`;
-  lb.prev.disabled = state.current <= 0;
-  lb.next.disabled = state.current >= state.total - 1;
+  lb.prev.disabled = index <= 0;
+  lb.next.disabled = index >= state.total - 1;
   lb.confirm.hidden = true;
   lb.remove.hidden = false;
 }
 
 function openLightbox(index) {
-  state.current = index;
+  state.currentName = state.images[index].name;
   renderLightbox();
   if (!lb.dialog.open) lb.dialog.showModal();
 }
 
 async function stepLightbox(delta) {
-  const target = state.current + delta;
+  const target = currentIndex() + delta;
   if (target < 0 || target >= state.total) return;
   if (target >= state.images.length) await loadGallery();
   if (target < state.images.length) openLightbox(target);
 }
 
 async function deleteCurrent() {
-  const image = state.images[state.current];
+  const image = currentImage();
   try {
     await api(imageUrl(image.name), { method: "DELETE" });
   } catch (error) {
-    toast(error.message, "error");
-    return;
+    if (error.status !== 404) { // 404: already removed outside the app, so drop it here too
+      toast(error.message, "error");
+      return;
+    }
   }
-  state.images.splice(state.current, 1);
+  const index = state.images.findIndex((candidate) => candidate.name === image.name);
+  if (index < 0) return;
+  state.images.splice(index, 1);
   state.total -= 1;
   renderGallery();
   if (state.stageName === image.name) {
@@ -290,7 +299,7 @@ async function deleteCurrent() {
     lb.dialog.close();
     return;
   }
-  openLightbox(Math.min(state.current, state.images.length - 1));
+  openLightbox(Math.min(index, state.images.length - 1));
 }
 
 // --- status ----------------------------------------------------------------
@@ -340,14 +349,14 @@ lb.dialog.addEventListener("keydown", (event) => {
 lb.prev.addEventListener("click", () => stepLightbox(-1));
 lb.next.addEventListener("click", () => stepLightbox(1));
 lb.reuse.addEventListener("click", () => {
-  fillComposer(state.images[state.current].params);
+  fillComposer(currentImage().params);
   els.advanced.open = true;
   lb.dialog.close();
   window.scrollTo({ top: 0, behavior: "smooth" });
   els.prompt.focus();
 });
 lb.vary.addEventListener("click", () => {
-  const params = { ...state.images[state.current].params, seed: null };
+  const params = { ...currentImage().params, seed: null };
   fillComposer(params);
   lb.dialog.close();
   window.scrollTo({ top: 0, behavior: "smooth" });

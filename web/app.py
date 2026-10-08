@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ from web.jobs import BusyError, JobManager, Runner
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]  # blocks DNS-rebinding pages from reaching the API
 MAX_PAGE = 200
 NO_GALLERY = (
     "ComfyUI's output folder is unknown. Start ComfyUI, or set COMFYUI_OUTPUT_DIR in .env."
@@ -111,6 +113,7 @@ def create_app(
     galleries = GalleryProvider(settings, output_dir)
     jobs = JobManager(runner or make_runner(settings, galleries))
     app = FastAPI(title="ComfyUI Studio", docs_url=None, redoc_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(ApiError)

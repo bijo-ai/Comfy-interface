@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 from PIL import Image
 
 from comfy_client import WorkflowError, identify_nodes
+
+log = logging.getLogger(__name__)
 
 THUMB_WIDTH = 320
 NUMERIC_KEYS = ("width", "height", "steps", "cfg", "seed")
@@ -144,7 +147,8 @@ class Gallery:
             return cached[1]
         try:
             width, height, params = read_png(path)
-        except OSError:
+        except Exception:  # corrupt files, oversized text chunks, decompression bombs: list without settings
+            log.debug("Could not read %s", path, exc_info=True)
             width, height, params = 0, 0, None
         image = GalleryImage(path.relative_to(self.output_dir).as_posix(), mtime, width, height, params)
         self._meta[path] = (mtime, image)

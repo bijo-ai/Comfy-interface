@@ -14,6 +14,8 @@ from tests.conftest import graph_for
 from web import app as app_module
 from web.app import GalleryProvider, create_app
 
+BASE_URL = "http://127.0.0.1"
+
 
 async def quick_runner(params, on_progress):
     on_progress(1, 2)
@@ -23,7 +25,7 @@ async def quick_runner(params, on_progress):
 
 @pytest.fixture
 def client(settings):
-    with TestClient(create_app(settings, runner=quick_runner)) as test_client:
+    with TestClient(create_app(settings, runner=quick_runner), base_url=BASE_URL) as test_client:
         yield test_client
 
 
@@ -71,7 +73,7 @@ def test_generate_busy_returns_409(settings) -> None:
         await asyncio.sleep(0.5)
         return {"image": None, "seed": 1, "elapsed": 0.5}
 
-    with TestClient(create_app(settings, runner=slow_runner)) as client:
+    with TestClient(create_app(settings, runner=slow_runner), base_url=BASE_URL) as client:
         assert client.post("/api/generate", json={"prompt": "a"}).status_code == 200
         response = client.post("/api/generate", json={"prompt": "b"})
         assert response.status_code == 409 and "already" in response.json()["error"]
@@ -81,7 +83,7 @@ def test_runner_error_is_streamed(settings) -> None:
     async def failing_runner(params, on_progress):
         raise ComfyUIUnavailableError("Cannot connect to ComfyUI at x. Is ComfyUI running?")
 
-    with TestClient(create_app(settings, runner=failing_runner)) as client:
+    with TestClient(create_app(settings, runner=failing_runner), base_url=BASE_URL) as client:
         job_id = client.post("/api/generate", json={"prompt": "a"}).json()["job_id"]
         assert sse_events(client, job_id) == [
             {"type": "error", "message": "Cannot connect to ComfyUI at x. Is ComfyUI running?"}
@@ -131,7 +133,7 @@ def test_paging(client, settings, make_png) -> None:
 
 def test_unknown_output_dir_returns_503(settings) -> None:
     unknown = replace(settings, comfyui_output_dir=None)
-    with TestClient(create_app(unknown, runner=quick_runner)) as client:
+    with TestClient(create_app(unknown, runner=quick_runner), base_url=BASE_URL) as client:
         for response in (client.get("/api/images"), client.post("/api/generate", json={"prompt": "a"})):
             assert response.status_code == 503
             assert "COMFYUI_OUTPUT_DIR" in response.json()["error"]
@@ -148,3 +150,8 @@ def test_gallery_provider_recovers_when_comfyui_starts(settings, monkeypatch, tm
     assert asyncio.run(provider.get()) is None
     gallery = asyncio.run(provider.get())
     assert gallery is not None and gallery.output_dir == tmp_path.resolve()
+
+
+def test_foreign_host_header_rejected(settings) -> None:
+    with TestClient(create_app(settings, runner=quick_runner), base_url="http://evil.example") as client:
+        assert client.get("/api/images").status_code == 400

@@ -95,3 +95,13 @@ def test_delete_removes_png_and_thumbnail(tmp_path: Path, make_png) -> None:
         gallery.delete("a.png")
     with pytest.raises(FileNotFoundError):
         gallery.get("a.png")
+
+
+def test_png_with_oversized_text_chunk_is_listed(tmp_path: Path) -> None:
+    from PIL.PngImagePlugin import PngInfo
+
+    info = PngInfo()
+    info.add_text("prompt", "x" * 2_000_000, zip=True)  # > Pillow's 1 MB MAX_TEXT_CHUNK once decompressed
+    Image.new("RGB", (8, 8)).save(tmp_path / "huge.png", pnginfo=info)
+    _, images = Gallery(tmp_path, tmp_path / "cache").page(0, 10)
+    assert [(i.name, i.params) for i in images] == [("huge.png", None)]
