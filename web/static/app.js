@@ -7,9 +7,10 @@ const els = {
   form: $("#composer"), prompt: $("#prompt"), negative: $("#negative"), width: $("#width"), height: $("#height"),
   steps: $("#steps"), cfg: $("#cfg"), seed: $("#seed"), advanced: $("#advanced"),
   generate: $("#generate"), generateLabel: $(".generate-label"), generateFill: $(".generate-fill"),
-  shapes: [...document.querySelectorAll(".shape")],
+  shapes: [...document.querySelectorAll(".shape[data-shape]")],
   stageImg: $("#stage-img"), stageEmpty: $("#stage-empty"), stageCaption: $("#stage-caption"),
-  live: $("#stage-live"), liveCanvas: $("#stage-canvas"),
+  live: $("#stage-live"), liveCanvas: $("#stage-canvas"), stageGrid: $("#stage-grid"),
+  model: $("#model"), modelNote: $("#model-note"), styles: $("#styles"), counts: [...document.querySelectorAll(".count")],
   gallery: $("#gallery"), galleryCount: $("#gallery-count"), galleryEmpty: $("#gallery-empty"), loadMore: $("#load-more"),
   status: $("#status"), statusText: $(".status-text"), banner: $("#offline-banner"), toasts: $("#toasts"),
 };
@@ -17,9 +18,14 @@ const lb = {
   dialog: $("#lightbox"), img: $("#lb-img"), prompt: $("#lb-prompt"), negative: $("#lb-negative"), meta: $("#lb-meta"),
   nometa: $("#lb-nometa"), reuse: $("#lb-reuse"), vary: $("#lb-vary"), download: $("#lb-download"),
   remove: $("#lb-delete"), confirm: $("#lb-confirm"), confirmYes: $("#lb-confirm-yes"), confirmNo: $("#lb-confirm-no"),
-  prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"),
+  prev: $("#lb-prev"), next: $("#lb-next"), close: $("#lb-close"), upscale: $("#lb-upscale"),
 };
-const state = { images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false };
+const state = {
+  images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
+  models: [], model: null, style: "none", count: 1,
+};
+const MAX_BATCH_SIDE = 768;
+const UPSCALE_MAX_SIDE = 768;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -55,6 +61,87 @@ function syncShapes() {
     const match = button.dataset.w === els.width.value && button.dataset.h === els.height.value;
     button.setAttribute("aria-checked", String(match));
   }
+  syncCount();
+}
+
+// --- models, styles, count --------------------------------------------------
+
+const modelByKey = (key) => state.models.find((model) => model.key === key);
+const modelByCkpt = (ckpt) => state.models.find((model) => model.ckpt === ckpt);
+
+async function loadModels() {
+  try {
+    const data = await api("/api/models");
+    state.models = data.models;
+    renderStyles(data.styles);
+    const options = data.models.filter((model) => model.available).map((model) => new Option(model.label, model.key));
+    if (!options.length) return;
+    els.model.replaceChildren(...options);
+    selectModel(data.default ?? options[0].value, { applyDefaults: true });
+  } catch {
+    // ComfyUI offline: checkStatus retries once it is back
+  }
+}
+
+function selectModel(key, { applyDefaults = false, keepSize = false } = {}) {
+  const model = modelByKey(key);
+  if (!model) return;
+  state.model = model;
+  els.model.value = key;
+  els.modelNote.hidden = !model.heavy;
+  els.modelNote.textContent = model.heavy ? "Heavy: about 30–60 s per image on your GPU, 1 at a time, no upscale." : "";
+  const shape = els.shapes.find((button) => button.getAttribute("aria-checked") === "true")?.dataset.shape ?? "square";
+  for (const button of els.shapes) {
+    const [width, height] = model.shapes[button.dataset.shape];
+    button.dataset.w = width;
+    button.dataset.h = height;
+    button.title = `${width}×${height}`;
+  }
+  if (applyDefaults) {
+    els.steps.value = model.steps;
+    els.cfg.value = model.cfg;
+  }
+  if (keepSize) syncShapes();
+  else setShape(shape);
+}
+
+function setShape(name) {
+  const button = els.shapes.find((candidate) => candidate.dataset.shape === name);
+  setSize(button.dataset.w, button.dataset.h);
+}
+
+function renderStyles(styles) {
+  els.styles.replaceChildren(...styles.map((style) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.setAttribute("role", "radio");
+    chip.dataset.style = style.key;
+    chip.textContent = `${style.emoji} ${style.label}`;
+    chip.addEventListener("click", () => setStyle(style.key));
+    return chip;
+  }));
+  setStyle(state.style);
+}
+
+function setStyle(key) {
+  state.style = key;
+  for (const chip of els.styles.children) chip.setAttribute("aria-checked", String(chip.dataset.style === key));
+}
+
+function setCount(count) {
+  state.count = count;
+  for (const button of els.counts) button.setAttribute("aria-checked", String(Number(button.dataset.count) === count));
+}
+
+function syncCount() {
+  const model = state.model;
+  const tooBig = Math.max(Number(els.width.value), Number(els.height.value)) > MAX_BATCH_SIDE;
+  const singleOnly = model && model.max_batch < 4;
+  const four = els.counts.find((button) => button.dataset.count === "4");
+  four.disabled = Boolean(singleOnly || tooBig);
+  four.title = singleOnly ? `${model.label} makes 1 image at a time` : tooBig ? `4 at once is limited to ${MAX_BATCH_SIDE}×${MAX_BATCH_SIDE}` : "";
+  if (four.disabled && state.count === 4) setCount(1);
 }
 
 function setSize(width, height) {
@@ -73,12 +160,18 @@ function readParams() {
     steps: Number(els.steps.value),
     cfg: Number(els.cfg.value),
     seed: seed === "" ? null : Number(seed),
+    model: state.model?.key ?? null,
+    style: state.style,
+    batch: state.count,
   };
 }
 
 function fillComposer(params) {
   els.prompt.value = params.prompt;
   els.negative.value = params.negative_prompt;
+  const model = params.model && modelByCkpt(params.model);
+  if (model) selectModel(model.key, { keepSize: true });
+  setStyle("none"); // the saved prompt already contains its style keywords
   setSize(params.width, params.height);
   els.steps.value = params.steps;
   els.cfg.value = params.cfg;
@@ -139,6 +232,7 @@ function startLive(width, height) {
   live.latestStep = 0;
   els.live.style.setProperty("--aspect", String(live.aspect));
   els.stageImg.hidden = true;
+  els.stageGrid.hidden = true;
   els.stageEmpty.hidden = true;
   els.live.hidden = false;
   els.stageCaption.textContent = "Warming up…";
@@ -206,13 +300,22 @@ async function generate(params) {
     els.prompt.focus();
     return;
   }
+  await runJob("/api/generate", params, params.width, params.height);
+}
+
+async function upscaleImage(image) {
+  await runJob("/api/upscale", { name: image.name }, image.width, image.height);
+}
+
+async function runJob(path, body, width, height) {
+  if (state.busy) return;
   setBusy(true);
-  startLive(params.width, params.height);
+  startLive(width, height);
   try {
-    const { job_id: jobId } = await api("/api/generate", {
+    const { job_id: jobId } = await api(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
+      body: JSON.stringify(body),
     });
     onGenerated(await followJob(jobId));
   } catch (error) {
@@ -230,20 +333,40 @@ function restoreStage() {
 }
 
 function onGenerated(event) {
-  if (!event.image) {
+  const images = event.images?.length ? event.images : event.image ? [event.image] : [];
+  if (!images.length) {
     toast("The image was generated but couldn't be found in ComfyUI's output folder.", "error");
     restoreStage();
     return;
   }
-  state.images.unshift(event.image);
-  state.total += 1;
+  state.images.unshift(...images);
+  state.total += images.length;
   renderGallery();
-  showOnStage(event.image, `Seed ${event.seed} · ${event.elapsed}s`, "from-live");
+  const caption = `Seed ${event.seed} · ${event.elapsed}s`;
+  if (images.length > 1) showGrid(images, caption);
+  else showOnStage(images[0], caption, "from-live");
 }
 
 // --- stage -----------------------------------------------------------------
 
+function showGrid(images, caption) {
+  state.stageName = images[0].name;
+  els.stageGrid.style.setProperty("--aspect", String(images[0].width / images[0].height));
+  els.stageGrid.replaceChildren(...images.map((image) => {
+    const img = document.createElement("img");
+    img.src = imageUrl(image.name);
+    img.alt = image.params?.prompt ?? image.name;
+    img.addEventListener("click", () => openLightbox(state.images.findIndex((item) => item.name === image.name)));
+    return img;
+  }));
+  els.stageImg.hidden = true;
+  els.stageEmpty.hidden = true;
+  els.stageGrid.hidden = false;
+  els.stageCaption.textContent = `${images.length} variations · ${caption}`;
+}
+
 function showOnStage(image, caption, animation = "reveal") {
+  els.stageGrid.hidden = true;
   state.stageName = image.name;
   els.stageImg.src = imageUrl(image.name);
   els.stageImg.alt = image.params?.prompt ?? image.name;
@@ -256,6 +379,7 @@ function showOnStage(image, caption, animation = "reveal") {
 }
 
 function clearStage() {
+  els.stageGrid.hidden = true;
   state.stageName = null;
   els.stageImg.hidden = true;
   els.stageEmpty.hidden = false;
@@ -310,7 +434,7 @@ async function loadGallery(reset = false) {
 function metaRows(image) {
   const p = image.params;
   const rows = [["Size", image.width ? `${image.width} × ${image.height}` : "Unknown"]];
-  if (p) rows.push(["Seed", p.seed], ["Steps", p.steps], ["CFG", p.cfg]);
+  if (p) rows.push(["Model", modelByCkpt(p.model)?.label ?? p.model ?? "Unknown"], ["Seed", p.seed], ["Steps", p.steps], ["CFG", p.cfg]);
   rows.push(["Created", new Date(image.created * 1000).toLocaleString()], ["File", image.name]);
   return rows.flatMap(([key, value]) => {
     const dt = document.createElement("dt");
@@ -339,6 +463,9 @@ function renderLightbox() {
     button.disabled = !params || (button === lb.vary && state.busy);
     button.title = params ? "" : "Settings unavailable for this image";
   }
+  const problem = upscaleProblem(image);
+  lb.upscale.disabled = Boolean(problem) || state.busy;
+  lb.upscale.title = problem ?? "Make a 2× larger, sharper version";
   lb.download.href = `${imageUrl(image.name)}?download=1`;
   lb.prev.disabled = index <= 0;
   lb.next.disabled = index >= state.total - 1;
@@ -350,6 +477,14 @@ function openLightbox(index) {
   state.currentName = state.images[index].name;
   renderLightbox();
   if (!lb.dialog.open) lb.dialog.showModal();
+}
+
+function upscaleProblem(image) {
+  if (!image.width) return "This image can't be read.";
+  if (Math.max(image.width, image.height) > UPSCALE_MAX_SIDE) return "Already large: upscaling it would overload your GPU.";
+  const model = image.params?.model && modelByCkpt(image.params.model);
+  if (model && !model.upscale) return `${model.label} images can't be upscaled.`;
+  return null;
 }
 
 async function stepLightbox(delta) {
@@ -398,6 +533,7 @@ async function checkStatus() {
   els.statusText.textContent = online ? "ComfyUI connected" : "ComfyUI offline";
   els.banner.hidden = online;
   if (online && state.galleryUnavailable) loadGallery(true);
+  if (online && !state.models.length) loadModels();
 }
 
 // --- wiring ----------------------------------------------------------------
@@ -439,12 +575,20 @@ lb.reuse.addEventListener("click", () => {
   els.prompt.focus();
 });
 lb.vary.addEventListener("click", () => {
-  const params = { ...currentImage().params, seed: null };
-  fillComposer(params);
+  fillComposer({ ...currentImage().params, seed: null });
+  setCount(1);
   lb.dialog.close();
   window.scrollTo({ top: 0, behavior: "smooth" });
-  generate(params);
+  generate(readParams());
 });
+lb.upscale.addEventListener("click", () => {
+  const image = currentImage();
+  lb.dialog.close();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  upscaleImage(image);
+});
+els.model.addEventListener("change", () => selectModel(els.model.value, { applyDefaults: true }));
+for (const button of els.counts) button.addEventListener("click", () => setCount(Number(button.dataset.count)));
 lb.remove.addEventListener("click", () => {
   lb.confirm.hidden = false;
   lb.remove.hidden = true;
@@ -457,6 +601,7 @@ lb.confirmNo.addEventListener("click", () => {
 lb.confirmYes.addEventListener("click", deleteCurrent);
 
 els.negative.value = DEFAULT_NEGATIVE;
+loadModels();
 loadGallery(true);
 checkStatus();
 setInterval(checkStatus, STATUS_INTERVAL_MS);

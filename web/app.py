@@ -224,7 +224,7 @@ def create_app(
         return {
             "models": [
                 {
-                    "key": p.key, "label": p.label, "family": p.family, "heavy": p.heavy,
+                    "key": p.key, "label": p.label, "ckpt": p.ckpt, "family": p.family, "heavy": p.heavy,
                     "shapes": {name: list(size) for name, size in p.shapes.items()},
                     "max_batch": p.max_batch, "upscale": p.upscale, "steps": p.steps, "cfg": p.cfg,
                     "available": p in available,

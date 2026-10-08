@@ -59,6 +59,20 @@ textarea { resize: vertical; field-sizing: content; min-height: 6lh; max-height:
 #negative { min-height: 3lh; }
 textarea:focus-visible, input:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .shapes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.counts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+select {
+  width: 100%; background: var(--field); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 10px 12px; color: inherit; font: inherit; outline: none; cursor: pointer;
+}
+select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.hint { margin: 0; font-size: 13px; color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--field);
+  cursor: pointer; font-size: 13px; transition: border-color .15s, background .15s;
+}
+.chip:hover { border-color: #3a3a42; }
+.chip[aria-checked="true"] { border-color: var(--accent); background: var(--surface-2); }
 .shape {
   display: flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 8px;
   background: var(--field); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer;
@@ -103,7 +117,9 @@ textarea:focus-visible, input:focus-visible { border-color: var(--accent); box-s
 .live::before { content: ""; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, transparent 0 3px, rgba(0, 0, 0, .22) 3px 4px); }
 .live::after { content: ""; position: absolute; left: 0; right: 0; height: 30%; top: -30%; pointer-events: none; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--accent) 14%, transparent), transparent); animation: scan 2.4s linear infinite; }
 @keyframes scan { to { transform: translateY(433%); } }
-#stage-img.from-live { animation: depixelate .9s var(--ease); }
+#stage-img.from-live, .stage-grid img { animation: depixelate .9s var(--ease); }
+.stage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: min(100%, calc(72vh * var(--aspect, 1))); }
+.stage-grid img { width: 100%; display: block; border-radius: var(--radius-sm); cursor: zoom-in; box-shadow: 0 12px 40px rgba(0, 0, 0, .4); }
 @keyframes depixelate { from { filter: blur(14px) saturate(1.3); transform: scale(1.01); } to { filter: none; transform: none; } }
 
 /* Gallery */
@@ -152,6 +168,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .lb-meta dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 .note { margin-top: 12px !important; font-size: 13px; }
 .lb-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; padding-top: 20px; }
+.lb-actions .wide { grid-column: 1 / -1; }
 .lb-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding: 12px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--danger) 10%, var(--surface-2)); }
 .lb-confirm span { flex: 1 1 100%; font-size: 14px; }
 

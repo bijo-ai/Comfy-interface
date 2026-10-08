@@ -25,11 +25,24 @@
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" rows="4" placeholder="A red fox in a snowy forest, golden hour, photo"></textarea>
 
+      <label class="label" for="model">Model</label>
+      <select id="model"><option value="">Default model</option></select>
+      <p id="model-note" class="hint" hidden></p>
+
+      <span class="label" id="style-label">Style</span>
+      <div id="styles" class="chips" role="radiogroup" aria-labelledby="style-label"></div>
+
       <span class="label" id="shape-label">Shape</span>
       <div class="shapes" role="radiogroup" aria-labelledby="shape-label">
-        <button type="button" class="shape" role="radio" data-w="512" data-h="512" aria-checked="true"><span class="shape-icon" style="--w:14px;--h:14px"></span>Square</button>
-        <button type="button" class="shape" role="radio" data-w="512" data-h="768" aria-checked="false"><span class="shape-icon" style="--w:11px;--h:16px"></span>Portrait</button>
-        <button type="button" class="shape" role="radio" data-w="768" data-h="512" aria-checked="false"><span class="shape-icon" style="--w:16px;--h:11px"></span>Landscape</button>
+        <button type="button" class="shape" role="radio" data-shape="square" data-w="512" data-h="512" aria-checked="true"><span class="shape-icon" style="--w:14px;--h:14px"></span>Square</button>
+        <button type="button" class="shape" role="radio" data-shape="portrait" data-w="512" data-h="768" aria-checked="false"><span class="shape-icon" style="--w:11px;--h:16px"></span>Portrait</button>
+        <button type="button" class="shape" role="radio" data-shape="landscape" data-w="768" data-h="512" aria-checked="false"><span class="shape-icon" style="--w:16px;--h:11px"></span>Landscape</button>
+      </div>
+
+      <span class="label" id="count-label">Images</span>
+      <div class="counts" role="radiogroup" aria-labelledby="count-label">
+        <button type="button" class="shape count" role="radio" data-count="1" aria-checked="true">×1</button>
+        <button type="button" class="shape count" role="radio" data-count="4" aria-checked="false">×4 variations</button>
       </div>
 
       <details class="advanced" id="advanced">
@@ -54,6 +67,7 @@
     <section class="stage panel" aria-live="polite" aria-label="Latest image">
       <p id="stage-empty" class="stage-empty">Your images will appear here.</p>
       <img id="stage-img" alt="" hidden>
+      <div id="stage-grid" class="stage-grid" hidden></div>
       <div id="stage-live" class="live" hidden aria-hidden="true"><canvas id="stage-canvas"></canvas></div>
       <p id="stage-caption" class="stage-caption"></p>
     </section>
@@ -87,6 +101,7 @@
         <div class="lb-actions">
           <button id="lb-reuse" type="button">Reuse</button>
           <button id="lb-vary" type="button">Vary</button>
+          <button id="lb-upscale" class="wide" type="button">🔍 Upscale ×2</button>
           <a id="lb-download" class="button" href="#" download>Download</a>
           <button id="lb-delete" class="danger" type="button">Delete</button>
         </div>
