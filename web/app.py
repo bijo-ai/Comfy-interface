@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,8 @@ from comfy_client import (
     get_output_dir,
 )
 from config import Settings, load_settings
+from web.bot import BotRunner, build_application
+from web.bot_core import StudioBot
 from web.gallery import Gallery
 from web.jobs import BusyError, JobManager, Runner
 
@@ -112,7 +114,19 @@ def create_app(
     settings = settings or load_settings()
     galleries = GalleryProvider(settings, output_dir)
     jobs = JobManager(runner or make_runner(settings, galleries))
-    app = FastAPI(title="ComfyUI Studio", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        bot_runner = None
+        if settings.telegram_bot_token:
+            studio = StudioBot(jobs, galleries, settings.telegram_allowed_user_id)
+            bot_runner = BotRunner(lambda: build_application(settings.telegram_bot_token, studio))
+            bot_runner.start()
+        yield
+        if bot_runner is not None:
+            await bot_runner.stop()
+
+    app = FastAPI(title="ComfyUI Studio", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

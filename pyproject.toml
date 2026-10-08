@@ -8,6 +8,8 @@ dependencies = [
     "mcp[cli]>=2.3.0,<3",
     "pillow>=12.3.0",
     "python-dotenv>=1.2.4",
+    "python-telegram-bot>=22.8",
+    "truststore>=0.10.4",
     "websockets>=17.2",
 ]
 

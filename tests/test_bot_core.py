@@ -93,11 +93,13 @@ def test_caption_truncates_long_prompts() -> None:
     assert caption.endswith("seed 7 · 512×768 · 3.2s")
 
 
-def test_unset_allowed_user_replies_with_id(tmp_path) -> None:
+def test_unset_allowed_user_replies_with_id(tmp_path, caplog) -> None:
     seen: list = []
     chat = FakeChat()
-    asyncio.run(make_bot(tmp_path, done_runner(seen), allowed=None).handle_text(777, "a cat", chat))
+    with caplog.at_level("INFO", logger="web.bot_core"):
+        asyncio.run(make_bot(tmp_path, done_runner(seen), allowed=None).handle_text(777, "a cat", chat))
     assert seen == [] and "777" in chat.texts()[0] and "TELEGRAM_ALLOWED_USER_ID=777" in chat.texts()[0]
+    assert "TELEGRAM_ALLOWED_USER_ID=777" in caplog.text  # visible in the Studio window too
 
 
 def test_other_user_ignored(tmp_path) -> None:
