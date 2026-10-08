@@ -5,20 +5,26 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-from web.bot_core import StudioBot
+from web.bot_core import Buttons, StudioBot
 
 log = logging.getLogger(__name__)
 
 RETRY_SECONDS = 30
-VARY_PREFIX = "vary:"
+COMMANDS = [
+    BotCommand("portrait", "Tall image: /portrait <prompt>"),
+    BotCommand("landscape", "Wide image: /landscape <prompt>"),
+    BotCommand("model", "Choose the model"),
+    BotCommand("style", "Choose a style"),
+    BotCommand("help", "How to use this bot"),
+]
 
 
 class TelegramChat:
@@ -28,8 +34,9 @@ class TelegramChat:
         self._bot = bot
         self._chat_id = chat_id
 
-    async def send_text(self, text: str) -> int:
-        return (await self._bot.send_message(self._chat_id, text)).message_id
+    async def send_text(self, text: str, buttons: Buttons | None = None) -> int:
+        markup = _keyboard(buttons) if buttons else None
+        return (await self._bot.send_message(self._chat_id, text, reply_markup=markup)).message_id
 
     async def edit_text(self, message_id: int, text: str) -> None:
         try:
@@ -43,10 +50,19 @@ class TelegramChat:
         except TelegramError as exc:
             log.debug("Telegram delete failed: %s", exc)
 
-    async def send_photo(self, path: Path, caption: str, vary_token: str) -> None:
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Vary", callback_data=VARY_PREFIX + vary_token)]])
-        with path.open("rb") as photo:
-            await self._bot.send_photo(self._chat_id, photo, caption=caption, reply_markup=markup)
+    async def send_photo(self, path: Path, caption: str, buttons: Buttons) -> None:
+        await self._bot.send_photo(self._chat_id, path.read_bytes(), caption=caption, reply_markup=_keyboard(buttons))
+
+    async def send_album(self, paths: list[Path], caption: str) -> None:
+        media = [InputMediaPhoto(path.read_bytes(), caption=caption if i == 0 else None) for i, path in enumerate(paths)]
+        await self._bot.send_media_group(self._chat_id, media)
+
+    async def send_document(self, path: Path, caption: str) -> None:
+        await self._bot.send_document(self._chat_id, InputFile(path.read_bytes(), filename=path.name), caption=caption)
+
+
+def _keyboard(buttons: Buttons) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in buttons])
 
 
 def build_application(token: str, studio: StudioBot) -> Application:
@@ -61,10 +77,8 @@ def build_application(token: str, studio: StudioBot) -> Application:
         if query is None or not query.data or chat is None:
             return
         await query.answer()
-        if query.data.startswith(VARY_PREFIX):
-            token = query.data[len(VARY_PREFIX):]
-            # effective_chat, not query.message.chat_id: old buttons arrive with an InaccessibleMessage
-            await studio.handle_vary(query.from_user.id, token, TelegramChat(context.bot, chat.id))
+        # effective_chat, not query.message.chat_id: old buttons arrive with an InaccessibleMessage
+        await studio.handle_button(query.from_user.id, query.data, TelegramChat(context.bot, chat.id))
 
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("Telegram handler failed", exc_info=context.error)
@@ -77,11 +91,21 @@ def build_application(token: str, studio: StudioBot) -> Application:
     return application
 
 
+async def register_commands(app: Application) -> None:
+    await app.bot.set_my_commands(COMMANDS)  # shows them in Telegram's "/" menu
+
+
 class BotRunner:
     """Starts polling in the background, retrying while offline. Never takes the website down."""
 
-    def __init__(self, factory: Callable[[], Any], retry_seconds: float = RETRY_SECONDS) -> None:
+    def __init__(
+        self,
+        factory: Callable[[], Any],
+        retry_seconds: float = RETRY_SECONDS,
+        on_started: Callable[[Any], Awaitable[None]] | None = None,
+    ) -> None:
         self._factory = factory
+        self._on_started = on_started
         self._retry_seconds = retry_seconds
         self._app: Any = None
         self._task: asyncio.Task[None] | None = None
@@ -112,6 +136,11 @@ class BotRunner:
             self._app = app
             self._started.set()
             log.info("Telegram bot connected")
+            if self._on_started is not None:
+                try:
+                    await self._on_started(app)
+                except Exception as exc:  # cosmetic extras must not take the bot down
+                    log.warning("Telegram bot started, but setup step failed: %s", exc)
             return
 
     async def stop(self) -> None:

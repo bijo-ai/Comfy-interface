@@ -30,7 +30,7 @@ from comfy_client import (
 from config import Settings, load_settings
 from models import PROFILES
 from styles import STYLES
-from web.bot import BotRunner, build_application
+from web.bot import BotRunner, build_application, register_commands
 from web.bot_core import StudioBot
 from web.builders import build_generation, build_upscale, resolve_profile
 from web.catalog import ModelCatalog
@@ -143,8 +143,10 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         bot_runner = None
         if settings.telegram_bot_token:
-            studio = StudioBot(jobs, galleries, settings.telegram_allowed_user_id)
-            bot_runner = BotRunner(lambda: build_application(settings.telegram_bot_token, studio))
+            studio = StudioBot(jobs, galleries, settings.telegram_allowed_user_id, catalog)
+            bot_runner = BotRunner(
+                lambda: build_application(settings.telegram_bot_token, studio), on_started=register_commands
+            )
             bot_runner.start()
         yield
         if bot_runner is not None:
