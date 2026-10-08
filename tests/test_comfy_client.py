@@ -49,6 +49,9 @@ def test_output_dir_from_argv() -> None:
 
 
 import struct
+from dataclasses import replace
+
+import pytest
 
 import httpx
 
@@ -182,3 +185,34 @@ def test_upload_image_multipart(tmp_path) -> None:
     assert asyncio.run(scenario()) == UPSCALE_INPUT_NAME
     assert seen["path"] == "/upload/image" and seen["type"].startswith("multipart/form-data")
     assert b'name="overwrite"' in seen["body"] and b"PNG fake" in seen["body"]
+
+
+from comfy_client import IMG2IMG_INPUT_NAME, build_img2img_workflow, fit_size
+
+
+def test_img2img_workflow_shape() -> None:
+    params = GenerationParams(prompt="make it winter", negative_prompt="blurry", steps=25, cfg=7.0, seed=3, batch=1)
+    graph = build_img2img_workflow("DreamShaper_8_pruned.safetensors", IMG2IMG_INPUT_NAME, params, strength=0.55)
+    by_class = {node["class_type"]: node["inputs"] for node in graph.values()}
+    assert by_class["LoadImage"]["image"] == IMG2IMG_INPUT_NAME
+    assert "VAEEncodeTiled" in by_class and "VAEDecodeTiled" in by_class
+    sampler = by_class["KSampler"]
+    assert (sampler["denoise"], sampler["steps"], sampler["cfg"], sampler["seed"]) == (0.55, 25, 7.0, 3)
+    assert "RepeatLatentBatch" not in by_class
+    assert by_class["SaveImage"]["filename_prefix"] == "ComfyUI_img2img"
+    four = build_img2img_workflow("x.safetensors", IMG2IMG_INPUT_NAME, replace(params, batch=4), strength=0.55)
+    repeat = next(n["inputs"] for n in four.values() if n["class_type"] == "RepeatLatentBatch")
+    assert repeat["amount"] == 4
+
+
+@pytest.mark.parametrize(
+    ("size", "max_side", "expected"),
+    [
+        ((4000, 3000), 768, (768, 576)),  # big phone photo: shrunk to the GPU-safe size
+        ((3000, 4000), 1024, (768, 1024)),
+        ((500, 333), 768, (512, 336)),  # small: grown to a usable size, multiples of 8
+        ((640, 640), 768, (640, 640)),
+    ],
+)
+def test_fit_size(size, max_side, expected) -> None:
+    assert fit_size(*size, max_side=max_side) == expected

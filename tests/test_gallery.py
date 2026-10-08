@@ -111,3 +111,16 @@ def test_read_params_includes_model() -> None:
     graph = graph_for(PARAMS)
     graph["4"]["inputs"]["ckpt_name"] = "DreamShaper_8_pruned.safetensors"
     assert params_from_graph(graph)["model"] == "DreamShaper_8_pruned.safetensors"
+
+
+def test_settings_read_from_upscale_and_img2img_graphs() -> None:
+    from comfy_client import build_img2img_workflow, build_upscale_workflow
+
+    params = GenerationParams(prompt="a fox", negative_prompt="blurry", seed=9, steps=25, cfg=7.0)
+    for graph in (
+        build_upscale_workflow("DreamShaper_8_pruned.safetensors", "src.png", params, cfg=7.0),
+        build_img2img_workflow("DreamShaper_8_pruned.safetensors", "src.png", params, strength=0.5),
+    ):
+        read = params_from_graph(graph, size=(1024, 1536))
+        assert read["prompt"] == "a fox" and read["seed"] == 9 and read["model"] == "DreamShaper_8_pruned.safetensors"
+        assert (read["width"], read["height"]) == (1024, 1536)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from io import BytesIO
 import json
 import logging
 import random
@@ -22,6 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
+from PIL import Image
 
 from config import Settings
 
@@ -245,7 +247,10 @@ class ComfyClient:
         return list(spec[0])
 
     async def upload_image(self, path: Path, name: str) -> str:
-        files = {"image": (name, path.read_bytes(), "image/png")}
+        return await self.upload_bytes(path.read_bytes(), name)
+
+    async def upload_bytes(self, data: bytes, name: str) -> str:
+        files = {"image": (name, data, "image/png")}
         response = await self._request("POST", "/upload/image", files=files, data={"overwrite": "true", "type": "input"})
         response.raise_for_status()
         return response.json()["name"]
@@ -454,6 +459,75 @@ async def upscale(
     result = await _run(workflow, UPSCALE_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
     result.params = replace(params, width=params.width * 2, height=params.height * 2, steps=UPSCALE_STEPS)
     return result
+
+
+async def img2img(
+    source: Path,
+    params: GenerationParams,
+    strength: float,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+    on_preview: PreviewCallback | None = None,
+) -> GenerationResult:
+    """Repaint an existing picture following the prompt; `strength` (denoise) sets how much it may change.
+
+    The source is resized to params.width × params.height first, so any photo stays within GPU-safe sizes.
+    """
+    if not params.model:
+        raise InvalidParamsError("Image-to-image needs a model.")
+    params.validate()
+    params = params.with_seed()
+    data = _resized_png(source, params.width, params.height)
+    async with httpx.AsyncClient(timeout=30) as http:
+        image_name = await ComfyClient(settings.comfyui_url, http).upload_bytes(data, IMG2IMG_INPUT_NAME)
+    workflow = build_img2img_workflow(params.model, image_name, params, strength)
+    return await _run(workflow, IMG2IMG_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
+
+
+def fit_size(width: int, height: int, max_side: int, min_side: int = 512) -> tuple[int, int]:
+    """Scale (width, height) so the long side is between min_side and max_side; multiples of 8."""
+    long_side = max(width, height)
+    scale = min(max(long_side, min_side), max_side) / long_side
+    return (round(width * scale) // 8 * 8, round(height * scale) // 8 * 8)
+
+
+def _resized_png(source: Path, width: int, height: int) -> bytes:
+    with Image.open(source) as img:
+        resized = img.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+    buffer = BytesIO()
+    resized.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+IMG2IMG_INPUT_NAME = "studio_img2img_src.png"
+IMG2IMG_SAVE_NODE = "9"
+
+
+def build_img2img_workflow(ckpt: str, image_name: str, params: GenerationParams, strength: float) -> Workflow:
+    latent: list[Any] = ["3", 0]
+    graph: Workflow = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "3": {"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["2", 0], "vae": ["1", 2], **TILED}},
+    }
+    if params.batch > 1:
+        graph["4"] = {"class_type": "RepeatLatentBatch", "inputs": {"samples": ["3", 0], "amount": params.batch}}
+        latent = ["4", 0]
+    graph.update({
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": params.prompt, "clip": ["1", 1]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": params.negative_prompt, "clip": ["1", 1]}},
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0], "seed": params.seed, "steps": params.steps, "cfg": params.cfg,
+                "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": strength,
+                "positive": ["5", 0], "negative": ["6", 0], "latent_image": latent,
+            },
+        },
+        "8": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["7", 0], "vae": ["1", 2], **TILED}},
+        IMG2IMG_SAVE_NODE: {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI_img2img"}},
+    })
+    return graph
 
 
 UPSCALE_INPUT_NAME = "studio_upscale_src.png"

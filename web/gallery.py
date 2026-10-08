@@ -11,7 +11,7 @@ from typing import Any
 
 from PIL import Image
 
-from comfy_client import WorkflowError, identify_nodes
+from comfy_client import WorkflowError, find_single_node, identify_nodes, linked_node
 
 log = logging.getLogger(__name__)
 
@@ -49,19 +49,21 @@ def resolve_safe(output_dir: Path, name: str) -> Path:
     return path
 
 
-def params_from_graph(graph: Any) -> dict[str, Any] | None:
-    """Extract generation settings from an API-format graph, or None if it isn't our shape."""
+def params_from_graph(graph: Any, size: tuple[int, int] | None = None) -> dict[str, Any] | None:
+    """Extract generation settings from an API-format graph, or None if it isn't our shape.
+
+    Graphs without an EmptyLatentImage (upscale, image-to-image) take their size from the image itself.
+    """
     if not isinstance(graph, dict):
         return None
     try:
-        roles = identify_nodes(graph)
-        sampler = graph[roles.sampler]["inputs"]
-        latent = graph[roles.latent]["inputs"]
+        sampler_id, positive, negative, width, height = _graph_layout(graph, size)
+        sampler = graph[sampler_id]["inputs"]
         params = {
-            "prompt": graph[roles.positive]["inputs"]["text"],
-            "negative_prompt": graph[roles.negative]["inputs"]["text"],
-            "width": latent["width"],
-            "height": latent["height"],
+            "prompt": graph[positive]["inputs"]["text"],
+            "negative_prompt": graph[negative]["inputs"]["text"],
+            "width": width,
+            "height": height,
             "steps": sampler["steps"],
             "cfg": sampler["cfg"],
             "seed": sampler["seed"],
@@ -78,6 +80,20 @@ def params_from_graph(graph: Any) -> dict[str, Any] | None:
     return params if texts_ok and numbers_ok else None
 
 
+def _graph_layout(graph: dict[str, Any], size: tuple[int, int] | None) -> tuple[str, str, str, Any, Any]:
+    try:
+        roles = identify_nodes(graph)
+    except WorkflowError:
+        if size is None:
+            raise
+        sampler = find_single_node(graph, "KSampler")
+        positive = linked_node(graph, sampler, "positive", "CLIPTextEncode")
+        negative = linked_node(graph, sampler, "negative", "CLIPTextEncode")
+        return sampler, positive, negative, size[0], size[1]
+    latent = graph[roles.latent]["inputs"]
+    return roles.sampler, roles.positive, roles.negative, latent["width"], latent["height"]
+
+
 def read_png(path: Path) -> tuple[int, int, dict[str, Any] | None]:
     """Return (width, height, params) for a PNG. Raises OSError if it can't be opened."""
     with Image.open(path) as img:
@@ -87,7 +103,7 @@ def read_png(path: Path) -> tuple[int, int, dict[str, Any] | None]:
         graph = json.loads(raw) if isinstance(raw, str) else None
     except json.JSONDecodeError:
         graph = None
-    return width, height, params_from_graph(graph)
+    return width, height, params_from_graph(graph, size=(width, height))
 
 
 class Gallery:
