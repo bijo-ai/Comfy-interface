@@ -178,3 +178,129 @@ def test_job_preview_404_before_first_frame(client) -> None:
     job_id = client.post("/api/generate", json={"prompt": "a"}).json()["job_id"]
     sse_events(client, job_id)
     assert client.get(f"/api/jobs/{job_id}/preview").status_code == 404
+
+
+# --- quality pack: models, styles, batch, upscale ------------------------------------------
+
+from comfy_client import GenerationParams as _Params  # noqa: E402
+from web.jobs import UpscaleRequest  # noqa: E402
+
+DREAM = "DreamShaper_8_pruned.safetensors"
+SDXL = "sd_xl_base_1.0.safetensors"
+SD15 = "v1-5-pruned-emaonly.safetensors"
+
+
+class FakeCatalog:
+    def __init__(self, ckpts: list[str]) -> None:
+        self.ckpts = ckpts
+
+    async def available(self):
+        from models import available_profiles
+
+        return available_profiles(self.ckpts)
+
+
+def recording_app(settings, seen: list, ckpts=(DREAM, SD15, SDXL)):
+    async def runner(request, on_progress, on_preview=None):
+        seen.append(request)
+        return {"image": None, "images": [], "seed": 1, "elapsed": 0.1}
+
+    return create_app(settings, runner=runner, catalog=FakeCatalog(list(ckpts)))
+
+
+def test_models_endpoint(settings) -> None:
+    with TestClient(recording_app(settings, [], ckpts=(SD15, SDXL)), base_url=BASE_URL) as client:
+        body = client.get("/api/models").json()
+    by_key = {m["key"]: m for m in body["models"]}
+    assert body["default"] == "sd15"  # DreamShaper not installed here
+    assert by_key["dreamshaper"]["available"] is False and by_key["sdxl"]["heavy"] is True
+    assert by_key["sdxl"]["shapes"]["portrait"] == [832, 1216] and by_key["sdxl"]["max_batch"] == 1
+    assert [s["key"] for s in body["styles"]][:2] == ["none", "photo"]
+
+
+def test_generate_with_model_style_batch(settings) -> None:
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        body = {"prompt": "a cat", "model": "dreamshaper", "style": "anime", "batch": 4, "width": 512, "height": 768}
+        job_id = client.post("/api/generate", json=body).json()["job_id"]
+        sse_events(client, job_id)
+    params = seen[0]
+    assert (params.model, params.batch, params.width, params.height) == (DREAM, 4, 512, 768)
+    assert params.prompt.startswith("a cat, ") and "anime" in params.prompt
+
+
+def test_generate_defaults_to_default_model(settings) -> None:
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        sse_events(client, client.post("/api/generate", json={"prompt": "a cat"}).json()["job_id"])
+    assert seen[0].model == DREAM and seen[0].batch == 1
+
+
+def test_generate_rejects_gpu_unsafe_or_missing(settings) -> None:
+    with TestClient(recording_app(settings, [], ckpts=(DREAM, SDXL)), base_url=BASE_URL) as client:
+        sdxl4 = client.post("/api/generate", json={"prompt": "a", "model": "sdxl", "batch": 4, "width": 1024, "height": 1024})
+        big4 = client.post("/api/generate", json={"prompt": "a", "model": "dreamshaper", "batch": 4, "width": 1024, "height": 1024})
+        missing = client.post("/api/generate", json={"prompt": "a", "model": "sd15"})
+        badstyle = client.post("/api/generate", json={"prompt": "a", "style": "glitter"})
+        empty = client.post("/api/generate", json={"prompt": "  ", "style": "anime"})
+    assert sdxl4.status_code == 422 and "1 image at a time" in sdxl4.json()["error"]
+    assert big4.status_code == 422 and "768" in big4.json()["error"]
+    assert missing.status_code == 422 and "isn't installed" in missing.json()["error"]
+    assert badstyle.status_code == 422 and "Unknown style" in badstyle.json()["error"]
+    assert empty.status_code == 422 and "prompt" in empty.json()["error"]
+
+
+def test_upscale_starts_job_with_source_settings(settings, make_png) -> None:
+    graph = graph_for(_Params(prompt="a fox", negative_prompt="blurry", width=512, height=768, seed=9))
+    make_png(settings.comfyui_output_dir / "fox.png", graph, size=(512, 768))
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        response = client.post("/api/upscale", json={"name": "fox.png"})
+        assert response.status_code == 200
+        sse_events(client, response.json()["job_id"])
+    request = seen[0]
+    assert isinstance(request, UpscaleRequest)
+    assert request.source == (settings.comfyui_output_dir / "fox.png").resolve()
+    p = request.params
+    assert (p.prompt, p.negative_prompt, p.seed, p.width, p.height, p.model) == ("a fox", "blurry", 9, 512, 768, SD15)
+
+
+def test_upscale_without_settings_uses_fallbacks(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "plain.png", size=(512, 512))
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        sse_events(client, client.post("/api/upscale", json={"name": "plain.png"}).json()["job_id"])
+    p = seen[0].params
+    assert p.prompt == "high quality, detailed" and p.model == DREAM and p.seed is None
+
+
+def test_upscale_refuses_large_or_sdxl(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "big.png", size=(1024, 1024))
+    graph = graph_for(_Params(prompt="a", width=512, height=512, seed=1))
+    graph["4"]["inputs"]["ckpt_name"] = SDXL
+    make_png(settings.comfyui_output_dir / "xl.png", graph, size=(512, 512))
+    with TestClient(recording_app(settings, []), base_url=BASE_URL) as client:
+        big = client.post("/api/upscale", json={"name": "big.png"})
+        xl = client.post("/api/upscale", json={"name": "xl.png"})
+        missing = client.post("/api/upscale", json={"name": "nope.png"})
+    assert big.status_code == 422 and "already large" in big.json()["error"]
+    assert xl.status_code == 422 and "SDXL" in xl.json()["error"]
+    assert missing.status_code == 404
+
+
+def test_batch_payload_lists_existing_images(settings, make_png, monkeypatch) -> None:
+    from comfy_client import GenerationResult
+
+    for i in (0, 1, 3):  # image 2 is missing on disk
+        make_png(settings.comfyui_output_dir / f"b{i}.png")
+
+    async def fake_generate(params, settings_, **kwargs):
+        refs = [{"filename": f"b{i}.png", "subfolder": "", "type": "output"} for i in range(4)]
+        return GenerationResult(b"png", None, replace(params, seed=3), "p", 1.0, refs[0], refs)
+
+    monkeypatch.setattr(app_module, "generate", fake_generate)
+    with TestClient(create_app(settings, catalog=FakeCatalog([DREAM])), base_url=BASE_URL) as client:
+        job_id = client.post("/api/generate", json={"prompt": "a", "batch": 4}).json()["job_id"]
+        done = sse_events(client, job_id)[-1]
+    assert [i["name"] for i in done["images"]] == ["b0.png", "b1.png", "b3.png"]
+    assert done["image"]["name"] == "b0.png"

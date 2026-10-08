@@ -6,13 +6,22 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from comfy_client import ComfyUIError, GenerationParams, PreviewCallback, ProgressCallback
 
 log = logging.getLogger(__name__)
 
-Runner = Callable[[GenerationParams, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
+@dataclass(frozen=True)
+class UpscaleRequest:
+    source: Path  # PNG in ComfyUI's output folder
+    params: GenerationParams  # prompt, negative, seed, cfg, model and source size to refine with
+
+
+JobRequest = GenerationParams | UpscaleRequest
+Runner = Callable[[JobRequest, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20
 
 
@@ -53,20 +62,20 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._active: Job | None = None
 
-    def start(self, params: GenerationParams) -> Job:
+    def start(self, request: JobRequest) -> Job:
         if self._active is not None and not self._active.done:
             raise BusyError("An image is already being generated. Wait for it to finish.")
         job = Job(uuid.uuid4().hex)
         self._jobs[job.id] = job
         self._active = job
-        job.task = asyncio.create_task(self._run(job, params))
+        job.task = asyncio.create_task(self._run(job, request))
         self._prune()
         return job
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
-    async def _run(self, job: Job, params: GenerationParams) -> None:
+    async def _run(self, job: Job, request: JobRequest) -> None:
         def on_progress(step: int, total: int) -> None:
             job.emit({"type": "progress", "step": step, "total": total, "preview": job.preview is not None})
 
@@ -74,7 +83,7 @@ class JobManager:
             job.preview = image
 
         try:
-            payload = await self._runner(params, on_progress, on_preview)
+            payload = await self._runner(request, on_progress, on_preview)
             job.emit({"type": "done", **payload}, final=True)
         except ComfyUIError as exc:
             job.emit({"type": "error", "message": str(exc)}, final=True)

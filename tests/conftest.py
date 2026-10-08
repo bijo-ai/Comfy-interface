@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from comfy_client import ComfyUIUnavailableError
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
@@ -42,3 +44,14 @@ def settings(tmp_path: Path) -> Settings:
         comfyui_output_dir=tmp_path / "comfy_out",
         cache_dir=tmp_path / "cache",
     )
+
+
+@pytest.fixture(autouse=True)
+def no_comfyui_checkpoint_lookup(monkeypatch):
+    """Tests never reach a real ComfyUI: make the model catalog's lookup fail instantly."""
+    from web.catalog import ModelCatalog
+
+    async def offline(self):
+        raise ComfyUIUnavailableError("offline in tests")
+
+    monkeypatch.setattr(ModelCatalog, "_fetch_checkpoints", offline)

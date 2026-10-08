@@ -25,12 +25,17 @@ from comfy_client import (
     ProgressCallback,
     generate,
     get_output_dir,
+    upscale,
 )
 from config import Settings, load_settings
+from models import PROFILES
+from styles import STYLES
 from web.bot import BotRunner, build_application
 from web.bot_core import StudioBot
+from web.builders import build_generation, build_upscale, resolve_profile
+from web.catalog import ModelCatalog
 from web.gallery import Gallery
-from web.jobs import BusyError, JobManager, Runner
+from web.jobs import BusyError, JobManager, JobRequest, Runner, UpscaleRequest
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +56,13 @@ class GenerateRequest(BaseModel):
     steps: int = 20
     cfg: float = 8.0
     seed: int | None = None
+    model: str | None = None  # profile key; None = default model
+    style: str = "none"
+    batch: int = 1
+
+
+class UpscaleBody(BaseModel):
+    name: str
 
 
 class ApiError(Exception):
@@ -82,18 +94,24 @@ def comfy_name(comfy_file: dict[str, str]) -> str:
 
 
 def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
-    async def run(
-        params: GenerationParams, on_progress: ProgressCallback, on_preview: PreviewCallback
-    ) -> dict[str, Any]:
-        result = await generate(params, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
+    async def run(request: JobRequest, on_progress: ProgressCallback, on_preview: PreviewCallback) -> dict[str, Any]:
+        if isinstance(request, UpscaleRequest):
+            result = await upscale(request.source, request.params, settings, on_progress, on_preview)
+        else:
+            result = await generate(request, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
-        image = None
-        if gallery is not None:
+        images = []
+        for comfy_file in result.comfy_files if gallery is not None else []:
             try:
-                image = gallery.get(comfy_name(result.comfy_file)).to_json()
+                images.append(gallery.get(comfy_name(comfy_file)).to_json())
             except (ValueError, FileNotFoundError):
-                log.warning("Generated file %s not found in gallery", result.comfy_file)
-        return {"image": image, "seed": result.params.seed, "elapsed": round(result.elapsed, 1)}
+                log.warning("Generated file %s not found in gallery", comfy_file)
+        return {
+            "image": images[0] if images else None,
+            "images": images,
+            "seed": result.params.seed,
+            "elapsed": round(result.elapsed, 1),
+        }
 
     return run
 
@@ -114,9 +132,11 @@ def create_app(
     settings: Settings | None = None,
     runner: Runner | None = None,
     output_dir: Path | None = None,
+    catalog: ModelCatalog | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     galleries = GalleryProvider(settings, output_dir)
+    catalog = catalog or ModelCatalog(settings.comfyui_url)
     jobs = JobManager(runner or make_runner(settings, galleries))
 
     @asynccontextmanager
@@ -168,17 +188,52 @@ def create_app(
 
     @app.post("/api/generate")
     async def start_generation(body: GenerateRequest) -> dict[str, str]:
-        params = GenerationParams(**body.model_dump())
         try:
-            params.validate()
+            profile = resolve_profile(body.model, await catalog.available())
+            params = build_generation(
+                prompt=body.prompt, negative_prompt=body.negative_prompt, width=body.width, height=body.height,
+                steps=body.steps, cfg=body.cfg, seed=body.seed, batch=body.batch, style=body.style, profile=profile,
+            )
         except InvalidParamsError as exc:
             raise ApiError(422, str(exc)) from exc
         await require_gallery()
+        return start_job(params)
+
+    def start_job(request: JobRequest) -> dict[str, str]:
         try:
-            job = jobs.start(params)
+            job = jobs.start(request)
         except BusyError as exc:
             raise ApiError(409, str(exc)) from exc
         return {"job_id": job.id}
+
+    @app.post("/api/upscale")
+    async def start_upscale(body: UpscaleBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        with image_errors():
+            image = gallery.get(body.name)
+        try:
+            request = build_upscale(image, gallery.path(body.name), await catalog.available())
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
+    @app.get("/api/models")
+    async def list_models() -> dict[str, Any]:
+        available = await catalog.available()
+        default = resolve_profile(None, available)
+        return {
+            "models": [
+                {
+                    "key": p.key, "label": p.label, "family": p.family, "heavy": p.heavy,
+                    "shapes": {name: list(size) for name, size in p.shapes.items()},
+                    "max_batch": p.max_batch, "upscale": p.upscale, "steps": p.steps, "cfg": p.cfg,
+                    "available": p in available,
+                }
+                for p in PROFILES
+            ],
+            "default": default.key if default else None,
+            "styles": [{"key": s.key, "label": s.label, "emoji": s.emoji} for s in STYLES],
+        }
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str) -> StreamingResponse:
