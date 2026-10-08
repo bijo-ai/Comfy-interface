@@ -216,3 +216,55 @@ def test_img2img_workflow_shape() -> None:
 )
 def test_fit_size(size, max_side, expected) -> None:
     assert fit_size(*size, max_side=max_side) == expected
+
+
+from comfy_client import build_inpaint_workflow, inpaint_masks
+
+
+def test_inpaint_workflow_keeps_unmasked_pixels() -> None:
+    params = GenerationParams(prompt="a red beanie hat", negative_prompt="blurry", steps=25, cfg=7.0, seed=4)
+    graph = build_inpaint_workflow("inpaint.safetensors", "src.png", "hard.png", "soft.png", params)
+    by_class: dict = {}
+    for node_id, node in graph.items():
+        by_class.setdefault(node["class_type"], []).append((node_id, node["inputs"]))
+    assert {inputs["image"] for _, inputs in by_class["LoadImageMask"]} == {"hard.png", "soft.png"}
+    (_, encode), = by_class["VAEEncodeForInpaint"]
+    (_, sampler), = by_class["KSampler"]
+    assert sampler["denoise"] == 1.0 and sampler["latent_image"][0] == by_class["VAEEncodeForInpaint"][0][0]
+    (_, composite), = by_class["ImageCompositeMasked"]
+    source_node = by_class["LoadImage"][0][0]
+    assert composite["destination"] == [source_node, 0]  # the original is the base: unmasked pixels are untouched
+    soft_node = next(nid for nid, inputs in by_class["LoadImageMask"] if inputs["image"] == "soft.png")
+    assert composite["mask"] == [soft_node, 0]
+    (_, save), = by_class["SaveImage"]
+    assert save["filename_prefix"] == "ComfyUI_inpaint"
+
+
+def test_inpaint_masks_are_resized_dilated_and_feathered(tmp_path) -> None:
+    import io
+
+    from PIL import Image, ImageDraw
+
+    mask_path = tmp_path / "mask.png"
+    mask = Image.new("RGB", (200, 100), "black")
+    ImageDraw.Draw(mask).rectangle((90, 40, 110, 60), fill="white")
+    mask.save(mask_path)
+    hard_png, soft_png = inpaint_masks(mask_path, 400, 200)
+    hard = Image.open(io.BytesIO(hard_png)).convert("L")
+    soft = Image.open(io.BytesIO(soft_png)).convert("L")
+    assert hard.size == soft.size == (400, 200)
+    assert {v for v, count in enumerate(hard.histogram()) if count} <= {0, 255}  # binary for the encoder
+    assert hard.getpixel((200, 100)) == 255 and hard.getpixel((10, 10)) == 0
+    assert hard.getpixel((176, 100)) == 255  # grown a little beyond the painted area (180)
+    assert 0 < soft.getpixel((172, 100)) < 255  # feathered edge for a seamless blend
+
+
+def test_empty_mask_is_rejected(tmp_path) -> None:
+    from PIL import Image
+
+    from comfy_client import InvalidParamsError
+
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (64, 64), "black").save(mask_path)
+    with pytest.raises(InvalidParamsError, match="Paint over"):
+        inpaint_masks(mask_path, 64, 64)

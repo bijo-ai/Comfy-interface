@@ -24,6 +24,8 @@ def resolve_profile(key: str | None, available: list[ModelProfile]) -> ModelProf
     if not key:
         return default_profile(available)
     profile = profile_by_key(key)
+    if profile is not None and not profile.selectable:
+        profile = None  # behind-the-scenes models can't be chosen directly
     if not available:
         raise InvalidParamsError("ComfyUI isn't reachable right now, or none of Studio's models are installed.")
     if profile is None or profile not in available:

@@ -46,3 +46,15 @@ def test_check_limits_rejects(key, width, height, batch, message) -> None:
 def test_check_limits_allows_normal_use() -> None:
     check_limits(profile_by_key("dreamshaper"), 512, 768, 4)
     check_limits(profile_by_key("sdxl"), 1024, 1024, 1)
+
+
+def test_inpaint_model_is_hidden_from_pickers() -> None:
+    from models import INPAINT_KEY
+
+    names = ALL + ["DreamShaper_8_INPAINTING.inpainting.safetensors"]
+    available = available_profiles(names)
+    assert INPAINT_KEY in [p.key for p in available]
+    assert default_profile(available).key == "dreamshaper"
+    assert not profile_by_key(INPAINT_KEY).selectable
+    only_inpaint = available_profiles(["DreamShaper_8_INPAINTING.inpainting.safetensors"])
+    assert default_profile(only_inpaint) is None  # never used for normal generation

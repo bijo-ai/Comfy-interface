@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 import websockets
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from config import Settings
 
@@ -493,10 +493,7 @@ def fit_size(width: int, height: int, max_side: int, min_side: int = 512) -> tup
 
 def _resized_png(source: Path, width: int, height: int) -> bytes:
     with Image.open(source) as img:
-        resized = img.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-    buffer = BytesIO()
-    resized.save(buffer, format="PNG")
-    return buffer.getvalue()
+        return _png(img.convert("RGB").resize((width, height), Image.Resampling.LANCZOS))
 
 
 IMG2IMG_INPUT_NAME = "studio_img2img_src.png"
@@ -528,6 +525,81 @@ def build_img2img_workflow(ckpt: str, image_name: str, params: GenerationParams,
         IMG2IMG_SAVE_NODE: {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI_img2img"}},
     })
     return graph
+
+
+async def inpaint(
+    source: Path,
+    mask: Path,
+    params: GenerationParams,
+    settings: Settings,
+    on_progress: ProgressCallback | None = None,
+    on_preview: PreviewCallback | None = None,
+) -> GenerationResult:
+    """Regenerate only the painted (white) area of `mask`; everything else keeps the original pixels."""
+    if not params.model:
+        raise InvalidParamsError("Inpainting needs a model.")
+    params.validate()
+    params = params.with_seed()
+    hard_mask, soft_mask = inpaint_masks(mask, params.width, params.height)
+    async with httpx.AsyncClient(timeout=30) as http:
+        client = ComfyClient(settings.comfyui_url, http)
+        image_name = await client.upload_bytes(_resized_png(source, params.width, params.height), INPAINT_INPUT_NAME)
+        hard_name = await client.upload_bytes(hard_mask, INPAINT_MASK_NAME)
+        soft_name = await client.upload_bytes(soft_mask, INPAINT_SOFT_MASK_NAME)
+    workflow = build_inpaint_workflow(params.model, image_name, hard_name, soft_name, params)
+    return await _run(workflow, INPAINT_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
+
+
+INPAINT_INPUT_NAME = "studio_inpaint_src.png"
+INPAINT_MASK_NAME = "studio_inpaint_mask.png"
+INPAINT_SOFT_MASK_NAME = "studio_inpaint_mask_soft.png"
+INPAINT_SAVE_NODE = "9"
+INPAINT_GROW_PX = 8  # the encoder sees a little more than the brush, so new content blends in
+INPAINT_FEATHER_PX = 4
+
+
+def inpaint_masks(mask: Path, width: int, height: int) -> tuple[bytes, bytes]:
+    """(hard, soft) masks as PNGs at the target size: hard (grown, binary) for the encoder, soft for blending."""
+    with Image.open(mask) as img:
+        painted = img.convert("L").resize((width, height), Image.Resampling.NEAREST).point(lambda v: 255 if v > 127 else 0)
+    if painted.getbbox() is None:
+        raise InvalidParamsError("Paint over the area you want to change first.")
+    hard = painted.filter(ImageFilter.MaxFilter(INPAINT_GROW_PX * 2 + 1))
+    soft = hard.filter(ImageFilter.GaussianBlur(INPAINT_FEATHER_PX))
+    return _png(hard.convert("RGB")), _png(soft.convert("RGB"))
+
+
+def _png(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def build_inpaint_workflow(ckpt: str, image_name: str, hard_mask: str, soft_mask: str, params: GenerationParams) -> Workflow:
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "3": {"class_type": "LoadImageMask", "inputs": {"image": hard_mask, "channel": "red"}},
+        "4": {"class_type": "LoadImageMask", "inputs": {"image": soft_mask, "channel": "red"}},
+        "5": {"class_type": "VAEEncodeForInpaint", "inputs": {"pixels": ["2", 0], "vae": ["1", 2], "mask": ["3", 0], "grow_mask_by": 0}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": params.prompt, "clip": ["1", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": params.negative_prompt, "clip": ["1", 1]}},
+        "8": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0], "seed": params.seed, "steps": params.steps, "cfg": params.cfg,
+                "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0,
+                "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0],
+            },
+        },
+        "10": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["8", 0], "vae": ["1", 2], **TILED}},
+        # paste the new area onto the original, so pixels outside the mask are exactly the original ones
+        "11": {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {"destination": ["2", 0], "source": ["10", 0], "x": 0, "y": 0, "resize_source": False, "mask": ["4", 0]},
+        },
+        INPAINT_SAVE_NODE: {"class_type": "SaveImage", "inputs": {"images": ["11", 0], "filename_prefix": "ComfyUI_inpaint"}},
+    }
 
 
 UPSCALE_INPUT_NAME = "studio_upscale_src.png"

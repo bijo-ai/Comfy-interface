@@ -25,13 +25,19 @@ class ModelProfile:
     steps: int
     cfg: float
     heavy: bool = False
+    selectable: bool = True  # False: only used behind the scenes (inpainting), never offered in pickers
 
 
 PROFILES = (
     ModelProfile("dreamshaper", "DreamShaper 8", "DreamShaper_8_pruned.safetensors", "sd15", SD15_SHAPES, 4, True, 25, 7.0),
     ModelProfile("sd15", "SD 1.5 base", "v1-5-pruned-emaonly.safetensors", "sd15", SD15_SHAPES, 4, True, 20, 8.0),
     ModelProfile("sdxl", "SDXL (heavy, slow)", "sd_xl_base_1.0.safetensors", "sdxl", SDXL_SHAPES, 1, False, 25, 7.0, heavy=True),
+    ModelProfile(
+        "dreamshaper_inpaint", "DreamShaper 8 Inpainting", "DreamShaper_8_INPAINTING.inpainting.safetensors",
+        "sd15", SD15_SHAPES, 1, False, 25, 7.0, selectable=False,
+    ),
 )
+INPAINT_KEY = "dreamshaper_inpaint"
 
 
 def available_profiles(ckpt_names: list[str]) -> list[ModelProfile]:
@@ -40,7 +46,8 @@ def available_profiles(ckpt_names: list[str]) -> list[ModelProfile]:
 
 
 def default_profile(available: list[ModelProfile]) -> ModelProfile | None:
-    return next((p for p in available if p.key == DEFAULT_KEY), available[0] if available else None)
+    selectable = [p for p in available if p.selectable]
+    return next((p for p in selectable if p.key == DEFAULT_KEY), selectable[0] if selectable else None)
 
 
 def profile_by_key(key: str) -> ModelProfile | None:
