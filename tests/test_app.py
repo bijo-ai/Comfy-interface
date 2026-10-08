@@ -413,3 +413,13 @@ def test_inpaint_model_cannot_be_picked_for_normal_generation(settings) -> None:
     with TestClient(recording_app(settings, [], ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
         response = client.post("/api/generate", json={"prompt": "a", "model": "dreamshaper_inpaint"})
     assert response.status_code == 422
+
+
+def test_inpainted_image_upscales_with_a_normal_model(settings, make_png) -> None:
+    graph = graph_for(_Params(prompt="a hat", width=512, height=512, seed=2))
+    graph["4"]["inputs"]["ckpt_name"] = INPAINT
+    make_png(settings.comfyui_output_dir / "fixed.png", graph, size=(512, 512))
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        sse_events(client, client.post("/api/upscale", json={"name": "fixed.png"}).json()["job_id"])
+    assert seen[0].params.model == DREAM

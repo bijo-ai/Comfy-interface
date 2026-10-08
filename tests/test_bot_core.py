@@ -96,7 +96,7 @@ def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
         seen.append(request)
         for step in range(1, 21):
             on_progress(step, 20)
-        if isinstance(request, UpscaleRequest):
+        if isinstance(request, UpscaleRequest) or type(request).__name__ == "InpaintRequest":
             count = 1
         else:
             count = request.params.batch if isinstance(request, Img2ImgRequest) else request.batch
@@ -520,3 +520,98 @@ def test_model_menu_hides_the_inpainting_model(tmp_path) -> None:
     bot = make_bot(tmp_path, done_runner([]), ckpts=(DREAM, "DreamShaper_8_INPAINTING.inpainting.safetensors"))
     asyncio.run(bot.handle_text(USER, "/model", chat))
     assert button_data(chat.calls[0][3]) == ["model:dreamshaper"]
+
+
+# --- /fix: inpainting from Telegram (pink scribble, or area buttons) ---------------------------
+
+from web.jobs import InpaintRequest  # noqa: E402
+
+INPAINT = "DreamShaper_8_INPAINTING.inpainting.safetensors"
+
+
+def photo_with_scribble(scribble: bool = True) -> bytes:
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (800, 600), (90, 140, 200))
+    if scribble:
+        ImageDraw.Draw(img).line([(320, 60), (480, 60), (470, 120), (330, 120)], fill=(255, 45, 170), width=18)
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
+def fix_bot(tmp_path, seen, make_png, ckpts=(DREAM, INPAINT)):
+    return make_bot(tmp_path, done_runner(seen, make_png, tmp_path), ckpts=ckpts)
+
+
+def test_fix_with_scribble_previews_then_inpaints(tmp_path, make_png) -> None:
+    from PIL import Image
+
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_with_scribble(), "/fix a red beanie hat", chat)
+        assert seen == []  # nothing runs before you confirm
+        _, preview, caption, buttons = chat.last("send_photo")
+        assert "a red beanie hat" in caption and preview.exists()
+        assert [data.split(":")[0] for data in button_data(buttons)] == ["fixok", "fixno"]
+        await bot.handle_button(USER, button_data(buttons)[0], chat)
+
+    asyncio.run(scenario())
+    request = seen[0]
+    assert isinstance(request, InpaintRequest) and request.params.prompt == "a red beanie hat"
+    with Image.open(request.mask) as mask:
+        assert mask.convert("L").getpixel((400, 62)) == 255 and mask.convert("L").getpixel((400, 500)) == 0
+    result_buttons = chat.last("send_photo")[3]
+    assert [data.split(":")[0] for data in button_data(result_buttons)] == ["vary", "up"]  # no ×4 for fixes
+
+
+def test_fix_without_scribble_offers_area_buttons(tmp_path, make_png) -> None:
+    from PIL import Image
+
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_with_scribble(False), "/fix a red beanie hat", chat)
+        _, text, _, buttons = next(c for c in reversed(chat.calls) if c[0] == "send_text")
+        assert "pink" in text
+        areas = [data for data in button_data(buttons) if data.startswith("area:")]
+        assert [data.rsplit(":", 1)[1] for data in areas] == ["top", "bottom", "left", "right", "middle"]
+        await bot.handle_button(USER, areas[0], chat)
+
+    asyncio.run(scenario())
+    with Image.open(seen[0].mask) as mask:
+        assert mask.convert("L").getpixel((400, 50)) == 255 and mask.convert("L").getpixel((400, 550)) == 0
+
+
+def test_fix_cancel_and_vary(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_with_scribble(), "/fix a hat", chat)
+        cancel = button_data(chat.last("send_photo")[3])[1]
+        await bot.handle_button(USER, cancel, chat)
+        assert seen == [] and "Cancelled" in chat.texts()[-1]
+        await bot.handle_photo(USER, photo_with_scribble(), "/fix a hat", chat)
+        await bot.handle_button(USER, button_data(chat.last("send_photo")[3])[0], chat)
+        vary = button_data(chat.last("send_photo")[3])[0]
+        await bot.handle_button(USER, vary, chat)
+
+    asyncio.run(scenario())
+    first, varied = seen
+    assert isinstance(varied, InpaintRequest) and varied.mask == first.mask and varied.params.seed is None
+
+
+def test_fix_needs_prompt_and_model(tmp_path, make_png) -> None:
+    seen: list = []
+    chat = FakeChat()
+    asyncio.run(fix_bot(tmp_path, seen, make_png).handle_photo(USER, photo_with_scribble(), "/fix", chat))
+    assert "/fix a red beanie hat" in chat.texts()[0]
+    chat = FakeChat()
+    asyncio.run(fix_bot(tmp_path, seen, make_png, ckpts=(DREAM,)).handle_photo(USER, photo_with_scribble(), "/fix a hat", chat))
+    assert seen == [] and "isn't installed" in chat.texts()[0]

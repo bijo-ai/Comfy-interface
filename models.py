@@ -34,7 +34,7 @@ PROFILES = (
     ModelProfile("sdxl", "SDXL (heavy, slow)", "sd_xl_base_1.0.safetensors", "sdxl", SDXL_SHAPES, 1, False, 25, 7.0, heavy=True),
     ModelProfile(
         "dreamshaper_inpaint", "DreamShaper 8 Inpainting", "DreamShaper_8_INPAINTING.inpainting.safetensors",
-        "sd15", SD15_SHAPES, 1, False, 25, 7.0, selectable=False,
+        "sd15", SD15_SHAPES, 1, True, 25, 7.0, selectable=False,  # its results can be upscaled (by DreamShaper)
     ),
 )
 INPAINT_KEY = "dreamshaper_inpaint"

@@ -23,6 +23,7 @@ COMMANDS = [
     BotCommand("landscape", "Wide image: /landscape <prompt>"),
     BotCommand("model", "Choose the model"),
     BotCommand("style", "Choose a style"),
+    BotCommand("fix", "Photo caption: /fix <what should be there> (draw with the pink pen first)"),
     BotCommand("help", "How to use this bot"),
 ]
 

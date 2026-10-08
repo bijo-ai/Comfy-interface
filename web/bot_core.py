@@ -9,13 +9,16 @@ import logging
 import time
 import uuid
 from collections import OrderedDict
+from io import BytesIO
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from PIL import Image
+
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError
-from models import SD15_SHAPES, ModelProfile, check_limits, default_profile, profile_for_ckpt
+from models import INPAINT_KEY, SD15_SHAPES, ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import STYLES, style_by_key
 from web.builders import (
     DEFAULT_STRENGTH,
@@ -23,10 +26,12 @@ from web.builders import (
     UPSCALE_MAX_SIDE,
     build_generation,
     build_img2img,
+    build_inpaint,
     build_upscale,
     resolve_profile,
 )
-from web.jobs import BusyError, Img2ImgRequest, JobManager, JobRequest, UpscaleRequest
+from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, UpscaleRequest
+from web.scribble import REGIONS, find_scribble, region_mask
 from web.sources import SourceStore
 from web.users import UserStore
 
@@ -45,7 +50,8 @@ HELP = (
     "• /landscape mountains at dawn → wide image\n"
     "• /model → choose the model\n"
     "• /style → choose a style\n"
-    "• send a photo with a caption (e.g. \"make it winter\") → edit that photo\n\n"
+    "• send a photo with a caption (e.g. \"make it winter\") → edit that photo\n"
+    "• draw on a photo with Telegram's pink pen, caption it /fix red beanie hat → change only that area\n\n"
     "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2."
 )
 OWNER_HELP = "\n• /users → see and remove the people you've let in"
@@ -59,6 +65,8 @@ WELCOME = (
     "Images are made on the owner's PC and saved on it too.\n\n" + HELP.replace(" on your PC", "")
 )
 DENIED_NOTICE = "Sorry, the owner didn't approve access to this bot."
+FIX_HINT = "Add what should be there after /fix, e.g. /fix a red beanie hat"
+FIX_CANCELLED = "Cancelled. Nothing was changed."
 NEED_CAPTION = 'Add a caption to the photo describing the change, e.g. "make it winter" or "as an oil painting".'
 
 
@@ -116,6 +124,7 @@ class Action:
     user_id: int  # buttons only work for the person they were sent to
     source: Path | None = None  # start image when the result came from image-to-image
     strength: float = 0.0
+    mask: Path | None = None  # painted area when the result came from /fix (inpainting)
 
 
 class ActionStore:
@@ -127,10 +136,10 @@ class ActionStore:
 
     def put(
         self, params: GenerationParams, image_name: str | None, user_id: int,
-        source: Path | None = None, strength: float = 0.0,
+        source: Path | None = None, strength: float = 0.0, mask: Path | None = None,
     ) -> str:
         token = uuid.uuid4().hex[:16]
-        self._items[token] = Action(params, image_name, user_id, source, strength)
+        self._items[token] = Action(params, image_name, user_id, source, strength, mask)
         while len(self._items) > self._keep:
             self._items.popitem(last=False)
         return token
@@ -138,6 +147,16 @@ class ActionStore:
     def get(self, token: str, user_id: int) -> Action | None:
         action = self._items.get(token)
         return action if action is not None and action.user_id == user_id else None
+
+
+@dataclass(frozen=True)
+class PendingFix:
+    """A /fix photo waiting for the person to confirm the marked area (or pick one)."""
+
+    source: Path
+    mask: Path | None  # None: no scribble found, waiting for an area button
+    prompt: str
+    user_id: int
 
 
 class StudioBot:
@@ -160,6 +179,7 @@ class StudioBot:
         self.chat_for = chat_for  # opens a chat with any user (set by the Telegram adapter)
         self.actions = ActionStore()
         self._prefs: dict[int, Prefs] = {}
+        self._fixes: OrderedDict[str, PendingFix] = OrderedDict()
 
     def prefs_for(self, user_id: int) -> Prefs:
         return self._prefs.setdefault(user_id, Prefs())
@@ -197,6 +217,9 @@ class StudioBot:
         if self.sources is None:
             await chat.send_text("⚠️ Photo editing isn't set up on this bot.")
             return
+        if command_name(caption) == "fix":
+            await self._start_fix(parse_request(caption)[1], data, chat, user_id)
+            return
         prefs = self.prefs_for(user_id)
         try:
             source = self.sources.path(self.sources.save(data))
@@ -221,7 +244,9 @@ class StudioBot:
         if not await self._admitted(user_id, who, chat):
             return
         kind, _, value = data.partition(":")
-        if kind in ("allow", "deny", "remove"):
+        if kind in ("fixok", "fixno", "area"):
+            await self._continue_fix(kind, value, chat, user_id)
+        elif kind in ("allow", "deny", "remove"):
             if user_id == self.owner_id and value.isdigit():
                 await self._decide(kind, int(value), chat)
         elif kind == "model":
@@ -238,6 +263,76 @@ class StudioBot:
                 await self._four_more(action, chat, user_id)
             else:
                 await self._upscale(action, chat, user_id)
+
+    # --- /fix (inpainting from a photo) -----------------------------------------
+
+    async def _start_fix(self, prompt: str, data: bytes, chat: Chat, user_id: int) -> None:
+        if not prompt:
+            await chat.send_text(FIX_HINT)
+            return
+        inpainter = profile_by_key(INPAINT_KEY)
+        if inpainter not in await self.catalog.available():
+            await chat.send_text(f"⚠️ /fix needs the {inpainter.label} model, which isn't installed in ComfyUI.")
+            return
+        try:
+            source = self.sources.path(self.sources.save(data))
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        marked = find_scribble(source)
+        if marked is None:
+            token = self._put_fix(PendingFix(source, None, prompt, user_id))
+            buttons = [(label, f"area:{token}:{key}") for key, label in REGIONS]
+            await chat.send_text(
+                "I didn't find a pink scribble on the photo. Which area should change?",
+                [buttons[:3], buttons[3:] + [("❌ Cancel", f"fixno:{token}")]],
+            )
+            return
+        mask = self.sources.path(self.sources.save(_png(marked)))
+        preview = self.sources.path(self.sources.save(_highlight(source, marked)))
+        token = self._put_fix(PendingFix(source, mask, prompt, user_id))
+        await chat.send_photo(
+            preview,
+            f"I'll repaint the highlighted area to show: {prompt}\nEverything else stays exactly the same.",
+            [[("✅ Fix this area", f"fixok:{token}"), ("❌ Cancel", f"fixno:{token}")]],
+        )
+
+    async def _continue_fix(self, kind: str, value: str, chat: Chat, user_id: int) -> None:
+        token, _, region = value.partition(":")
+        pending = self._fixes.get(token)
+        if pending is None or pending.user_id != user_id:
+            await chat.send_text(EXPIRED)
+            return
+        del self._fixes[token]
+        if kind == "fixno":
+            await chat.send_text(FIX_CANCELLED)
+            return
+        mask = pending.mask
+        if kind == "area":
+            if region not in dict(REGIONS):
+                await chat.send_text(EXPIRED)
+                return
+            with Image.open(pending.source) as img:
+                mask = self.sources.path(self.sources.save(_png(region_mask(img.size, region))))
+        if mask is None:
+            await chat.send_text(EXPIRED)
+            return
+        try:
+            request = build_inpaint(
+                source=pending.source, mask=mask, prompt=pending.prompt, negative_prompt=DEFAULT_NEGATIVE,
+                style=self.prefs_for(user_id).style_key, seed=None, available=await self.catalog.available(),
+            )
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
+
+    def _put_fix(self, pending: PendingFix) -> str:
+        token = uuid.uuid4().hex[:16]
+        self._fixes[token] = pending
+        while len(self._fixes) > ACTIONS_KEEP:
+            self._fixes.popitem(last=False)
+        return token
 
     # --- access --------------------------------------------------------------
 
@@ -374,9 +469,11 @@ class StudioBot:
         await self._run(params, chat, user_id)
 
     @staticmethod
-    def _again(action: Action, batch: int) -> GenerationParams | Img2ImgRequest:
-        """The same settings with a new seed: from the same start image if there was one."""
+    def _again(action: Action, batch: int) -> JobRequest:
+        """The same settings with a new seed: from the same start image (and painted area) if there was one."""
         params = replace(action.params, seed=None, batch=batch)
+        if action.source and action.mask:
+            return InpaintRequest(action.source, action.mask, replace(params, batch=1))
         return Img2ImgRequest(action.source, params, action.strength) if action.source else params
 
     async def _four_more(self, action: Action, chat: Chat, user_id: int) -> None:
@@ -413,6 +510,8 @@ class StudioBot:
             label = "🔍 Upscaling ×2"
         elif isinstance(request, Img2ImgRequest):
             label = f"🎨 {self._model_label(request.params)} · editing your photo"
+        elif isinstance(request, InpaintRequest):
+            label = "🖌️ Fixing the marked area"
         else:
             label = f"🎨 {self._model_label(request)}"
         status = await chat.send_text(f"{label}…")
@@ -439,7 +538,7 @@ class StudioBot:
             p = request.params
             await chat.send_document(paths[0], f"🔍 Upscaled ×2 · {p.width * 2}×{p.height * 2} · {event['elapsed']}s")
         else:
-            params = request.params if isinstance(request, Img2ImgRequest) else request
+            params = request.params if isinstance(request, Img2ImgRequest | InpaintRequest) else request
             caption = caption_for(params, event["seed"], event["elapsed"], self._model_label(params))
             if len(paths) > 1:
                 await chat.send_album(paths, caption)
@@ -448,18 +547,20 @@ class StudioBot:
                 await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"], user_id))
         await chat.delete(status)
 
-    def _reuse(self, request: GenerationParams | Img2ImgRequest, image_name: str | None, user_id: int) -> str:
+    def _reuse(self, request: JobRequest, image_name: str | None, user_id: int) -> str:
+        if isinstance(request, InpaintRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, mask=request.mask)
         if isinstance(request, Img2ImgRequest):
             return self.actions.put(request.params, image_name, user_id, request.source, request.strength)
         return self.actions.put(request, image_name, user_id)
 
-    def _photo_buttons(self, request: GenerationParams | Img2ImgRequest, image_name: str, user_id: int) -> Buttons:
-        params = request.params if isinstance(request, Img2ImgRequest) else request
+    def _photo_buttons(self, request: JobRequest, image_name: str, user_id: int) -> Buttons:
+        params = request.params if isinstance(request, Img2ImgRequest | InpaintRequest) else request
         profile = profile_for_ckpt(params.model or "") or FALLBACK_LIMITS
         small = max(params.width, params.height) <= UPSCALE_MAX_SIDE
         reuse = self._reuse(request, None, user_id)
         row = [("🔁 Vary", f"vary:{reuse}")]
-        if profile.max_batch >= 4 and small:
+        if profile.max_batch >= 4 and small and not isinstance(request, InpaintRequest):
             row.append(("🖼️ ×4", f"x4:{reuse}"))
         if profile.upscale and small:
             row.append(("🔍 Upscale", f"up:{self.actions.put(params, image_name, user_id)}"))
@@ -473,3 +574,21 @@ class StudioBot:
     def _model_label(params: GenerationParams) -> str:
         profile = profile_for_ckpt(params.model or "")
         return profile.label if profile else "Stable Diffusion"
+
+
+def _png(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _highlight(source: Path, mask: Image.Image) -> bytes:
+    """The photo with the area that will change tinted amber, for the confirmation message."""
+    with Image.open(source) as img:
+        photo = img.convert("RGB")
+    tint = Image.new("RGB", photo.size, (242, 181, 68))
+    photo.paste(tint, mask=mask.convert("L").point(lambda v: 140 if v else 0))
+    photo.thumbnail((1280, 1280))
+    buffer = BytesIO()
+    photo.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()

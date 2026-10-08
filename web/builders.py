@@ -125,7 +125,8 @@ def build_upscale(image: GalleryImage, source: Path, available: list[ModelProfil
     source_profile = profile_for_ckpt(params.get("model", ""))
     if source_profile is not None and not source_profile.upscale:
         raise InvalidParamsError(f"{source_profile.label} images can't be upscaled; it would overload the GPU.")
-    profile = source_profile if source_profile in available else _upscale_fallback(available)
+    usable = source_profile in available and source_profile.selectable  # never refine with the inpainting model
+    profile = source_profile if usable else _upscale_fallback(available)
     return UpscaleRequest(
         source=source,
         params=GenerationParams(
@@ -141,7 +142,7 @@ def build_upscale(image: GalleryImage, source: Path, available: list[ModelProfil
 
 
 def _upscale_fallback(available: list[ModelProfile]) -> ModelProfile:
-    candidates = [p for p in available if p.upscale]
+    candidates = [p for p in available if p.upscale and p.selectable]
     profile = default_profile(candidates)
     if profile is None:
         raise InvalidParamsError("No SD 1.5 model is installed in ComfyUI for upscaling.")

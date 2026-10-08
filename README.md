@@ -62,7 +62,7 @@ A local website for generating and browsing images without an LLM. Type a prompt
     (`Lykon/DreamShaper` on Hugging Face). The buttons only appear when it's installed. It isn't offered as a
     normal model.
   - **Size:** images are fitted to 768 px for inpainting. The GPU load is the same as a normal image (~6–8 s).
-  - Inpainting is Studio-only: there's no way to paint a mask in Telegram.
+  - **In Telegram:** use `/fix` (see the Telegram section).
 - **Live preview:** the image forms on screen, from pixel noise to chunky pixels to sharp. It uses
   ComfyUI's TAESD previews when `models/vae_approx/taesd*_decoder` is installed, and the built-in ones otherwise.
 - **Gallery:** shows every PNG in ComfyUI's output folder, newest first. That includes images you made
@@ -138,6 +138,18 @@ How it behaves:
 | **🖼️ ×4** under an image | 4 new variations as an album, then **🔍 1–4** buttons to upscale your favourite |
 | **🔍 Upscale** under an image | a 2× larger version, sent as a file so Telegram doesn't compress it |
 | a **photo with a caption** ("make it winter") | that photo repainted following the caption; 🔁 Vary and 🖼️ ×4 keep using the same photo |
+| a photo you **drew on with the pink pen**, captioned `/fix a red beanie hat` | only the scribbled area changes (inpainting), after you confirm a preview |
+
+**`/fix` in Telegram:**
+1. In Telegram's photo editor, draw over the part to change with a **bright pink** pen. Scribble over it, or
+   circle it: the inside of a circle counts too.
+2. Send the photo with the caption `/fix <what the picture should show>`.
+3. The bot replies with a preview of the highlighted area and **✅ Fix this area** / **❌ Cancel**. Nothing runs
+   until you confirm.
+
+The scribble is removed and everything outside it keeps the original pixels. If no pink is found, the bot
+offers **Top · Bottom · Left · Right · Middle** buttons instead. Pink is used because it's rare in real photos;
+if your photo has lots of bright pink, check the preview before confirming.
 | `/help` | these instructions plus your current model and style |
 
 Sizes follow the chosen model. The GPU limits above apply here too: SDXL images get only 🔁 Vary.
