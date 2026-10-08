@@ -513,3 +513,10 @@ def test_stranger_photo_goes_through_approval(tmp_path) -> None:
     chat = FakeChat()
     asyncio.run(bot.handle_photo(FRIEND, photo_bytes(), "make it winter", chat, who="Ann"))
     assert seen == [] and chat.texts() == [REQUEST_SENT] and not (tmp_path / "sources").exists()
+
+
+def test_model_menu_hides_the_inpainting_model(tmp_path) -> None:
+    chat = FakeChat()
+    bot = make_bot(tmp_path, done_runner([]), ckpts=(DREAM, "DreamShaper_8_INPAINTING.inpainting.safetensors"))
+    asyncio.run(bot.handle_text(USER, "/model", chat))
+    assert button_data(chat.calls[0][3]) == ["model:dreamshaper"]

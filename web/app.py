@@ -27,17 +27,25 @@ from comfy_client import (
     generate,
     get_output_dir,
     img2img,
+    inpaint,
     upscale,
 )
 from config import Settings, load_settings
-from models import PROFILES
+from models import INPAINT_KEY, PROFILES, profile_by_key
 from styles import STYLES
 from web.bot import BotRunner, build_application, register_commands
 from web.bot_core import StudioBot
-from web.builders import DEFAULT_STRENGTH, build_generation, build_img2img, build_upscale, resolve_profile
+from web.builders import (
+    DEFAULT_STRENGTH,
+    build_generation,
+    build_img2img,
+    build_inpaint,
+    build_upscale,
+    resolve_profile,
+)
 from web.catalog import ModelCatalog
 from web.gallery import Gallery
-from web.jobs import BusyError, Img2ImgRequest, JobManager, JobRequest, Runner, UpscaleRequest
+from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, Runner, UpscaleRequest
 from web.sources import SourceStore
 from web.users import UserStore
 
@@ -70,6 +78,16 @@ class GenerateRequest(BaseModel):
 
 class UpscaleBody(BaseModel):
     name: str
+
+
+class InpaintBody(BaseModel):
+    prompt: str
+    mask_id: str  # uploaded mask: white = repaint
+    source_id: str | None = None
+    source_name: str | None = None
+    negative_prompt: str = DEFAULT_NEGATIVE
+    style: str = "none"
+    seed: int | None = None
 
 
 class ApiError(Exception):
@@ -106,6 +124,8 @@ def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
             result = await upscale(request.source, request.params, settings, on_progress, on_preview)
         elif isinstance(request, Img2ImgRequest):
             result = await img2img(request.source, request.params, request.strength, settings, on_progress, on_preview)
+        elif isinstance(request, InpaintRequest):
+            result = await inpaint(request.source, request.mask, request.params, settings, on_progress, on_preview)
         else:
             result = await generate(request, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
@@ -201,17 +221,38 @@ def create_app(
             await galleries.get()
         return {"comfyui": online, "output_dir": str(galleries.output_dir) if galleries.output_dir else None}
 
+    def resolve_source(gallery: Gallery, source_id: str | None, source_name: str | None) -> Path | None:
+        with image_errors():
+            if source_id:
+                return sources.path(source_id)
+            if source_name:
+                path = gallery.path(source_name)
+                if not path.is_file():
+                    raise FileNotFoundError(source_name)
+                return path
+        return None
+
+    @app.post("/api/inpaint")
+    async def start_inpaint(body: InpaintBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = resolve_source(gallery, body.source_id, body.source_name)
+        if source is None:
+            raise ApiError(422, "Choose the image to fix.")
+        with image_errors():
+            mask = sources.path(body.mask_id)
+        try:
+            request = build_inpaint(
+                source=source, mask=mask, prompt=body.prompt, negative_prompt=body.negative_prompt,
+                style=body.style, seed=body.seed, available=await catalog.available(),
+            )
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
     @app.post("/api/generate")
     async def start_generation(body: GenerateRequest) -> dict[str, str]:
         gallery = await require_gallery()
-        source = None
-        with image_errors():
-            if body.source_id:
-                source = sources.path(body.source_id)
-            elif body.source_name:
-                source = gallery.path(body.source_name)
-                if not source.is_file():
-                    raise FileNotFoundError(body.source_name)
+        source = resolve_source(gallery, body.source_id, body.source_name)
         try:
             profile = resolve_profile(body.model, await catalog.available())
             common = dict(
@@ -273,8 +314,10 @@ def create_app(
                     "available": p in available,
                 }
                 for p in PROFILES
+                if p.selectable
             ],
             "default": default.key if default else None,
+            "inpaint": profile_by_key(INPAINT_KEY) in available,
             "styles": [{"key": s.key, "label": s.label, "emoji": s.emoji} for s in STYLES],
         }
 

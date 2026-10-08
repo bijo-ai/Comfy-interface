@@ -312,7 +312,7 @@ class StudioBot:
             current = resolve_profile(prefs.model_key, available) if available else None
         except InvalidParamsError:  # the chosen model was removed from ComfyUI
             current = default_profile(available)
-        rows = [[(("✓ " if p == current else "") + p.label, f"model:{p.key}")] for p in available]
+        rows = [[(("✓ " if p == current else "") + p.label, f"model:{p.key}")] for p in available if p.selectable]
         await chat.send_text("Choose a model:" if rows else "ComfyUI isn't reachable right now.", rows or None)
 
     async def _choose_model(self, key: str, prefs: Prefs, chat: Chat) -> None:

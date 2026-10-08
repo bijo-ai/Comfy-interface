@@ -27,7 +27,14 @@ class Img2ImgRequest:
     strength: float  # 0..1: how much the picture may change
 
 
-JobRequest = GenerationParams | UpscaleRequest | Img2ImgRequest
+@dataclass(frozen=True)
+class InpaintRequest:
+    source: Path  # image to fix
+    mask: Path  # white = repaint, black = keep exactly
+    params: GenerationParams  # prompt for the painted area, size (fitted), inpainting model
+
+
+JobRequest = GenerationParams | UpscaleRequest | Img2ImgRequest | InpaintRequest
 Runner = Callable[[JobRequest, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20
 

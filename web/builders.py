@@ -6,11 +6,11 @@ from pathlib import Path
 
 from PIL import Image
 
-from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError, fit_size
-from models import ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
+from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError, fit_size, inpaint_masks
+from models import INPAINT_KEY, ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import apply_style
 from web.gallery import GalleryImage
-from web.jobs import Img2ImgRequest, UpscaleRequest
+from web.jobs import Img2ImgRequest, InpaintRequest, UpscaleRequest
 
 UPSCALE_MAX_SIDE = 768  # ×2 of this is the largest image the 6 GB GPU refines comfortably
 IMG2IMG_MAX_SIDE = {"sd15": 768, "sdxl": 1024}  # start images are resized to fit these
@@ -89,6 +89,30 @@ def build_img2img(
     if params.model is None:
         params = GenerationParams(**{**params.__dict__, "model": FALLBACK_LIMITS.ckpt})
     return Img2ImgRequest(source=source, params=params, strength=strength)
+
+
+def build_inpaint(
+    *, source: Path, mask: Path, prompt: str, negative_prompt: str, style: str, seed: int | None,
+    available: list[ModelProfile],
+) -> InpaintRequest:
+    """Plan an inpainting job: only the painted area changes, using the dedicated inpainting model."""
+    profile = profile_by_key(INPAINT_KEY)
+    if profile not in available:
+        raise InvalidParamsError(f"Inpainting needs the {profile.label} model, which isn't installed in ComfyUI.")
+    if not prompt.strip():
+        raise InvalidParamsError("Invalid parameters: prompt must not be empty.")
+    try:
+        with Image.open(source) as img:
+            width, height = fit_size(*img.size, IMG2IMG_MAX_SIDE["sd15"])
+    except OSError as exc:
+        raise InvalidParamsError("The image can't be read.") from exc
+    inpaint_masks(mask, width, height)  # raises if nothing was painted
+    prompt, negative_prompt = apply_style(prompt, negative_prompt, style)
+    params = GenerationParams(
+        prompt, negative_prompt, width, height, profile.steps, profile.cfg, seed, model=profile.ckpt,
+    )
+    params.validate()
+    return InpaintRequest(source=source, mask=mask, params=params)
 
 
 def build_upscale(image: GalleryImage, source: Path, available: list[ModelProfile]) -> UpscaleRequest:

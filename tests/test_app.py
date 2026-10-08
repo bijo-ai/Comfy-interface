@@ -352,3 +352,64 @@ def test_img2img_errors(settings) -> None:
         gone = client.post("/api/generate", json={"prompt": "a", "source_name": "nope.png"})
     assert not_image.status_code == 422 and "isn't an image" in not_image.json()["error"]
     assert missing.status_code == 404 and gone.status_code == 404
+
+
+# --- inpainting --------------------------------------------------------------------------------
+
+INPAINT = "DreamShaper_8_INPAINTING.inpainting.safetensors"
+
+
+def _mask(size=(800, 600), painted=True) -> bytes:
+    import io
+
+    from PIL import Image, ImageDraw
+
+    mask = Image.new("RGB", size, "black")
+    if painted:
+        ImageDraw.Draw(mask).rectangle((300, 0, 500, 150), fill="white")
+    buffer = io.BytesIO()
+    mask.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _upload(client, data: bytes) -> str:
+    return client.post("/api/sources", content=data, headers={"Content-Type": "image/png"}).json()["id"]
+
+
+def test_inpaint_starts_job(settings) -> None:
+    from web.jobs import InpaintRequest
+
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        models = client.get("/api/models").json()
+        assert models["inpaint"] is True and "dreamshaper_inpaint" not in [m["key"] for m in models["models"]]
+        body = {"source_id": _upload(client, _jpeg()), "mask_id": _upload(client, _mask()), "prompt": "a red beanie", "style": "photo"}
+        response = client.post("/api/inpaint", json=body)
+        assert response.status_code == 200
+        sse_events(client, response.json()["job_id"])
+    request = seen[0]
+    assert isinstance(request, InpaintRequest)
+    assert (request.params.model, request.params.width, request.params.height) == (INPAINT, 768, 576)
+    assert request.params.prompt.startswith("a red beanie, ") and "photograph" in request.params.prompt
+
+
+def test_inpaint_errors(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "pic.png", size=(512, 512))
+    with TestClient(recording_app(settings, [], ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        empty = client.post("/api/inpaint", json={"source_name": "pic.png", "mask_id": _upload(client, _mask(painted=False)), "prompt": "a hat"})
+        no_prompt = client.post("/api/inpaint", json={"source_name": "pic.png", "mask_id": _upload(client, _mask()), "prompt": " "})
+        missing = client.post("/api/inpaint", json={"source_name": "nope.png", "mask_id": _upload(client, _mask()), "prompt": "a hat"})
+    assert empty.status_code == 422 and "Paint over" in empty.json()["error"]
+    assert no_prompt.status_code == 422 and "prompt" in no_prompt.json()["error"]
+    assert missing.status_code == 404
+    with TestClient(recording_app(settings, [], ckpts=(DREAM,)), base_url=BASE_URL) as client:
+        assert client.get("/api/models").json()["inpaint"] is False
+        body = {"source_name": "pic.png", "mask_id": _upload(client, _mask()), "prompt": "a hat"}
+        not_installed = client.post("/api/inpaint", json=body)
+    assert not_installed.status_code == 422 and "Inpainting" in not_installed.json()["error"]
+
+
+def test_inpaint_model_cannot_be_picked_for_normal_generation(settings) -> None:
+    with TestClient(recording_app(settings, [], ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        response = client.post("/api/generate", json={"prompt": "a", "model": "dreamshaper_inpaint"})
+    assert response.status_code == 422
