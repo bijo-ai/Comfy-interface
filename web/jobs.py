@@ -56,8 +56,22 @@ class SharpUpscaleRequest:
     params: GenerationParams  # source size (and the parent's prompt, for the caption)
 
 
+@dataclass(frozen=True)
+class BackgroundRequest:
+    source: Path
+    mode: str  # transparent, white, black, blur or prompt
+    params: GenerationParams  # for "prompt": the new background's prompt, work size and inpainting model
+
+
+@dataclass(frozen=True)
+class FacesRequest:
+    source: Path
+    params: GenerationParams  # face prompt (with the picture's own prompt), model, steps, cfg
+
+
 JobRequest = (
-    GenerationParams | UpscaleRequest | Img2ImgRequest | InpaintRequest | ExtendRequest | RemoveRequest | SharpUpscaleRequest
+    GenerationParams | UpscaleRequest | Img2ImgRequest | InpaintRequest | ExtendRequest | RemoveRequest
+    | SharpUpscaleRequest | BackgroundRequest | FacesRequest
 )
 Runner = Callable[[JobRequest, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20

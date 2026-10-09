@@ -246,8 +246,8 @@ class ComfyClient:
             return list(spec[1].get("options", []))
         return list(spec[0])
 
-    async def list_upscale_models(self) -> list[str]:
-        response = await self._request("GET", "/models/upscale_models")
+    async def list_model_files(self, folder: str) -> list[str]:
+        response = await self._request("GET", f"/models/{folder}")
         response.raise_for_status()
         return [name for name in response.json() if isinstance(name, str)]
 

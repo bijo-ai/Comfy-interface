@@ -1,5 +1,5 @@
 """Telegram bot behaviour without the Telegram library: access control, commands, models, styles, ×4, upscale,
-/fix, /extend and /remove.
+/fix, /extend, /remove, /faces, /nobg and /bg.
 
 The owner (TELEGRAM_ALLOWED_USER_ID) approves anyone else who wants to use the bot.
 """
@@ -28,7 +28,9 @@ from web.builders import (
     FALLBACK_LIMITS,
     SHARP_MAX_SIDE,
     UPSCALE_MAX_SIDE,
+    build_background,
     build_extend,
+    build_faces,
     build_generation,
     build_img2img,
     build_inpaint,
@@ -38,8 +40,10 @@ from web.builders import (
     resolve_profile,
 )
 from web.jobs import (
+    BackgroundRequest,
     BusyError,
     ExtendRequest,
+    FacesRequest,
     Img2ImgRequest,
     InpaintRequest,
     JobManager,
@@ -70,8 +74,11 @@ HELP = (
     "• send a photo with a caption (e.g. \"make it winter\") → edit that photo\n"
     "• draw on a photo with Telegram's pink pen, caption it /fix red beanie hat → change only that area\n"
     "• draw over something with the pink pen, caption it /remove → it disappears\n"
-    "• send a photo captioned /extend → make it wider, taller or bigger all round\n\n"
-    "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2 · ↔️ Extend · 🔎 Sharp ×4."
+    "• send a photo captioned /extend → make it wider, taller or bigger all round\n"
+    "• send a photo captioned /faces → clearer, more detailed faces\n"
+    "• send a photo captioned /nobg → the subject cut out (a PNG with a see-through background)\n"
+    "• send a photo captioned /bg white, /bg blur or /bg a sunny beach → a new background\n\n"
+    "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2 · ↔️ Extend · 🔎 Sharp ×4 · 😊 Faces · 🌄 Background."
 )
 OWNER_HELP = "\n• /users → see and remove the people you've let in"
 BUSY = "⏳ Busy with another image. Try again in a moment."
@@ -90,6 +97,8 @@ REMOVE_HINT = (
     "then send it again with the caption /remove"
 )
 EXTEND_QUESTION = "Which way should I extend the picture?"
+BACKGROUND_QUESTION = "What should be behind the subject? (For a new scene, send the photo captioned /bg a sunny beach.)"
+BACKGROUND_CHOICES = {"transparent": "✂️ Nothing (cut out)", "white": "⬜ White", "black": "⬛ Black", "blur": "🌫️ Blur"}
 EXTEND_CHOICES = {
     "w": ({"left", "right"}, "↔️ Wider"),
     "t": ({"top", "bottom"}, "↕️ Taller"),
@@ -115,6 +124,7 @@ class GalleryLookup(Protocol):
 class Catalog(Protocol):
     async def available(self) -> list[ModelProfile]: ...
     async def upscalers(self) -> list[str]: ...
+    async def files(self, folder: str) -> list[str]: ...
 
 
 def command_name(text: str) -> str | None:
@@ -252,7 +262,7 @@ class StudioBot:
             await chat.send_text("⚠️ Photo editing isn't set up on this bot.")
             return
         command = command_name(caption)
-        if command in ("fix", "remove", "extend"):
+        if command in ("fix", "remove", "extend", "faces", "nobg", "bg"):
             source = self._keep_photo(data)
             if source is None:
                 await chat.send_text("⚠️ That photo can't be read. Send it as a normal photo (JPEG or PNG).")
@@ -260,6 +270,14 @@ class StudioBot:
                 await self._start_fix(parse_request(caption)[1], source, chat, user_id)
             elif command == "remove":
                 await self._start_remove(source, chat, user_id)
+            elif command == "faces":
+                await self._faces(source, None, chat, user_id)
+            elif command == "nobg":
+                await self._background(source, "transparent", "", chat, user_id)
+            elif command == "bg":
+                choice = parse_request(caption)[1]
+                mode = choice.lower() if choice.lower() in BACKGROUND_CHOICES else "prompt"
+                await self._background(source, mode, "" if mode != "prompt" else choice, chat, user_id)
             else:
                 await self._ask_extend(source, parse_request(caption)[1], chat, user_id)
             return
@@ -287,7 +305,7 @@ class StudioBot:
         if not await self._admitted(user_id, who, chat):
             return
         kind, _, value = data.partition(":")
-        if kind in ("fixok", "fixno", "area", "rmok", "exd"):
+        if kind in ("fixok", "fixno", "area", "rmok", "exd", "bgx"):
             await self._continue_fix(kind, value, chat, user_id)
         elif kind in ("allow", "deny", "remove"):
             if user_id == self.owner_id and value.isdigit():
@@ -296,7 +314,7 @@ class StudioBot:
             await self._choose_model(value, self.prefs_for(user_id), chat)
         elif kind == "style":
             await self._choose_style(value, self.prefs_for(user_id), chat)
-        elif kind in ("vary", "x4", "up", "sharp", "ext"):
+        elif kind in ("vary", "x4", "up", "sharp", "ext", "faces", "bgm"):
             action = self.actions.get(value, user_id)
             if action is None:
                 await chat.send_text(EXPIRED)
@@ -308,6 +326,8 @@ class StudioBot:
                 await self._sharp(action, chat, user_id)
             elif kind == "ext":
                 await self._extend_result(action, chat, user_id)
+            elif kind in ("faces", "bgm"):
+                await self._result_tool(kind, action, chat, user_id)
             else:
                 await self._upscale(action, chat, user_id)
 
@@ -373,13 +393,52 @@ class StudioBot:
         buttons = [(label, f"exd:{token}:{key}") for key, (_, label) in EXTEND_CHOICES.items()]
         await chat.send_text(EXTEND_QUESTION, [buttons, [("❌ Cancel", f"fixno:{token}")]])
 
-    async def _extend_result(self, action: Action, chat: Chat, user_id: int) -> None:
+    async def _gallery_file(self, action: Action, chat: Chat) -> Path | None:
         gallery = await self.galleries.get()
         path = gallery.path(action.image_name) if gallery is not None and action.image_name else None
         if path is None or not path.is_file():
             await chat.send_text("⚠️ That image isn't in the gallery any more.")
+            return None
+        return path
+
+    async def _extend_result(self, action: Action, chat: Chat, user_id: int) -> None:
+        path = await self._gallery_file(action, chat)
+        if path is not None:
+            await self._ask_extend(path, "", chat, user_id)
+
+    async def _result_tool(self, kind: str, action: Action, chat: Chat, user_id: int) -> None:
+        """😊 Faces runs straight away; 🌄 Background asks what should go behind the subject."""
+        path = await self._gallery_file(action, chat)
+        if path is None:
             return
-        await self._ask_extend(path, "", chat, user_id)
+        if kind == "faces":
+            await self._faces(path, action.params.prompt if action.image_name else None, chat, user_id)
+            return
+        token = self._put_fix(PendingFix(path, None, "", user_id, tool="background"))
+        buttons = [(label, f"bgx:{token}:{mode}") for mode, label in BACKGROUND_CHOICES.items()]
+        await chat.send_text(BACKGROUND_QUESTION, [buttons[:2], buttons[2:], [("❌ Cancel", f"fixno:{token}")]])
+
+    async def _faces(self, source: Path, prompt: str | None, chat: Chat, user_id: int) -> None:
+        try:
+            request = build_faces(
+                source=source, parent_params={"prompt": prompt} if prompt else None,
+                available=await self.catalog.available(), detectors=await self.catalog.files("detection"),
+            )
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
+
+    async def _background(self, source: Path, mode: str, prompt: str, chat: Chat, user_id: int) -> None:
+        try:
+            request = build_background(
+                source=source, mode=mode, prompt=prompt, available=await self.catalog.available(),
+                removers=await self.catalog.files("background_removal"),
+            )
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
 
     async def _continue_fix(self, kind: str, value: str, chat: Chat, user_id: int) -> None:
         token, _, region = value.partition(":")
@@ -390,6 +449,12 @@ class StudioBot:
         del self._fixes[token]
         if kind == "fixno":
             await chat.send_text(FIX_CANCELLED)
+            return
+        if kind == "bgx":
+            if region in BACKGROUND_CHOICES:
+                await self._background(pending.source, region, "", chat, user_id)
+            else:
+                await chat.send_text(EXPIRED)
             return
         if kind in ("rmok", "exd"):
             await self._run_edit(kind, region, pending, chat, user_id)
@@ -582,6 +647,10 @@ class StudioBot:
             return ExtendRequest(action.source, action.layout, replace(params, batch=1))
         if action.source and action.tool == "remove" and action.mask:
             return RemoveRequest(action.source, action.mask, replace(params, batch=1))
+        if action.source and action.tool == "faces":
+            return FacesRequest(action.source, replace(params, batch=1))
+        if action.source and action.tool.startswith("background:"):
+            return BackgroundRequest(action.source, action.tool.split(":", 1)[1], replace(params, batch=1))
         if action.source and action.mask:
             return InpaintRequest(action.source, action.mask, replace(params, batch=1))
         return Img2ImgRequest(action.source, params, action.strength) if action.source else params
@@ -639,6 +708,10 @@ class StudioBot:
             label = "↔️ Extending the picture"
         elif isinstance(request, RemoveRequest):
             label = "🧽 Removing the marked area"
+        elif isinstance(request, FacesRequest):
+            label = "😊 Fixing faces"
+        elif isinstance(request, BackgroundRequest):
+            label = "🌄 Changing the background"
         elif isinstance(request, Img2ImgRequest):
             label = f"🎨 {self._model_label(request.params)} · editing your photo"
         elif isinstance(request, InpaintRequest):
@@ -669,8 +742,14 @@ class StudioBot:
             p, scale = request.params, 2 if isinstance(request, UpscaleRequest) else 4
             icon = "🔍" if scale == 2 else "🔎"
             await chat.send_document(paths[0], f"{icon} Upscaled ×{scale} · {p.width * scale}×{p.height * scale} · {event['elapsed']}s")
-        elif isinstance(request, ExtendRequest | RemoveRequest):
-            what = "↔️ Extended" if isinstance(request, ExtendRequest) else "🧽 Removed"
+        elif isinstance(request, BackgroundRequest) and request.mode == "transparent":
+            # as a file: Telegram photos lose the see-through background
+            await chat.send_document(paths[0], f"✂️ Cut out · {images[0]['width']}×{images[0]['height']} · {event['elapsed']}s")
+        elif isinstance(request, ExtendRequest | RemoveRequest | FacesRequest | BackgroundRequest):
+            what = {
+                ExtendRequest: "↔️ Extended", RemoveRequest: "🧽 Removed", FacesRequest: "😊 Faces fixed",
+                BackgroundRequest: "🌄 New background",
+            }[type(request)]
             caption = f"{what} · {images[0]['width']}×{images[0]['height']} · {event['elapsed']}s"
             await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"], user_id))
         else:
@@ -688,6 +767,10 @@ class StudioBot:
             return self.actions.put(request.params, image_name, user_id, request.source, layout=request.layout, tool="extend")
         if isinstance(request, RemoveRequest):
             return self.actions.put(request.params, image_name, user_id, request.source, mask=request.mask, tool="remove")
+        if isinstance(request, FacesRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, tool="faces")
+        if isinstance(request, BackgroundRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, tool=f"background:{request.mode}")
         if isinstance(request, InpaintRequest):
             return self.actions.put(request.params, image_name, user_id, request.source, mask=request.mask)
         if isinstance(request, Img2ImgRequest):
@@ -695,7 +778,7 @@ class StudioBot:
         return self.actions.put(request, image_name, user_id)
 
     def _photo_buttons(self, request: JobRequest, image_name: str, user_id: int) -> Buttons:
-        edit = isinstance(request, InpaintRequest | ExtendRequest | RemoveRequest)
+        edit = isinstance(request, InpaintRequest | ExtendRequest | RemoveRequest | FacesRequest | BackgroundRequest)
         params = request.params if isinstance(request, Img2ImgRequest) or edit else request
         profile = profile_for_ckpt(params.model or "") or FALLBACK_LIMITS
         small = max(params.width, params.height) <= UPSCALE_MAX_SIDE
@@ -709,7 +792,8 @@ class StudioBot:
         more = [("↔️ Extend", f"ext:{image}")]
         if max(params.width, params.height) <= SHARP_MAX_SIDE:
             more.append(("🔎 Sharp ×4", f"sharp:{image}"))
-        return [row, more]
+        looks = [("😊 Faces", f"faces:{image}"), ("🌄 Background", f"bgm:{image}")]
+        return [row, more, looks]
 
     def _picker_buttons(self, request: GenerationParams | Img2ImgRequest, images: list[dict[str, Any]], user_id: int) -> Buttons:
         upscale_row = [(f"🔍 {n}", f"up:{self._reuse(request, image['name'], user_id)}") for n, image in enumerate(images, 1)]

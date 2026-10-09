@@ -198,6 +198,11 @@ class FakeCatalog:
     async def upscalers(self):
         return self.upscaler_files
 
+    async def files(self, folder):
+        installed = {"upscale_models": self.upscaler_files, "background_removal": ["birefnet.safetensors"],
+                     "detection": ["mediapipe_face_fp32.safetensors"]}
+        return installed.get(folder, []) if self.upscaler_files else []
+
     async def available(self):
         from models import available_profiles
 
@@ -574,3 +579,75 @@ def test_new_kinds_in_gallery() -> None:
     assert image_kind("ComfyUI_outpaint_00001_.png") == "edited"
     assert image_kind("ComfyUI_remove_00001_.png") == "fixed"
     assert image_kind("ComfyUI_upscaled_x4_00001_.png") == "upscaled"
+
+
+# --- Phase 3: background and faces ---------------------------------------------------------------------
+
+
+def test_background_starts_job(settings, make_png) -> None:
+    from web.jobs import BackgroundRequest
+
+    make_png(settings.comfyui_output_dir / "pic.png", size=(1600, 1200))
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        models = client.get("/api/models").json()
+        assert models["background"] is True and models["faces"] is True
+        for body in ({"mode": "transparent"}, {"mode": "prompt", "prompt": "a sunny beach"}):
+            response = client.post("/api/background", json={"source_name": "pic.png", **body})
+            assert response.status_code == 200
+            sse_events(client, response.json()["job_id"])
+        no_prompt = client.post("/api/background", json={"source_name": "pic.png", "mode": "prompt"})
+        bad_mode = client.post("/api/background", json={"source_name": "pic.png", "mode": "sparkles"})
+    cut, painted = seen
+    assert isinstance(cut, BackgroundRequest) and cut.mode == "transparent"
+    assert (painted.params.prompt, painted.params.model, painted.params.width) == ("a sunny beach", INPAINT, 768)
+    assert no_prompt.status_code == bad_mode.status_code == 422
+    with TestClient(recording_app(settings, [], upscalers=[]), base_url=BASE_URL) as client:  # no models installed
+        missing = client.post("/api/background", json={"source_name": "pic.png", "mode": "white"})
+    assert missing.status_code == 422 and "BiRefNet" in missing.json()["error"]
+
+
+def test_faces_starts_job_with_the_pictures_prompt(settings, make_png) -> None:
+    from web.jobs import FacesRequest
+
+    graph = graph_for(_Params(prompt="an old fisherman", width=512, height=512, seed=3))
+    make_png(settings.comfyui_output_dir / "old.png", graph, size=(512, 512))
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM,)), base_url=BASE_URL) as client:
+        response = client.post("/api/faces", json={"source_name": "old.png"})
+        assert response.status_code == 200
+        sse_events(client, response.json()["job_id"])
+        upload = client.post("/api/faces", json={"source_id": _upload(client, _jpeg())})
+        sse_events(client, upload.json()["job_id"])
+    gallery_face, uploaded_face = seen
+    assert isinstance(gallery_face, FacesRequest) and gallery_face.params.model == DREAM
+    assert gallery_face.params.prompt.startswith("an old fisherman, detailed face")
+    assert uploaded_face.params.prompt.startswith("detailed face")
+    with TestClient(recording_app(settings, [], ckpts=(DREAM,), upscalers=[]), base_url=BASE_URL) as client:
+        missing = client.post("/api/faces", json={"source_name": "old.png"})
+    assert missing.status_code == 422 and "MediaPipe" in missing.json()["error"]
+
+
+def test_transparency_survives_uploads_drafts_and_thumbnails(settings) -> None:
+    import io
+
+    from PIL import Image
+
+    settings.comfyui_output_dir.mkdir(parents=True)
+    cutout = Image.new("RGBA", (64, 64), (255, 0, 0, 0))
+    cutout.paste((255, 0, 0, 255), (16, 16, 48, 48))
+    buffer = io.BytesIO()
+    cutout.save(buffer, format="PNG")
+    with TestClient(create_app(settings, runner=quick_runner), base_url=BASE_URL) as client:
+        source_id = _upload(client, buffer.getvalue())
+        opaque_id = _upload(client, _jpeg())
+        response = client.post("/api/save", json={"source_id": source_id})
+        assert response.status_code == 200, response.text
+        saved = response.json()
+        thumb = client.get(f"/api/thumbs/{saved['name']}")
+    stored = settings.cache_dir / "sources"
+    assert Image.open(stored / f"{source_id}.png").mode == "RGBA"
+    assert Image.open(stored / f"{opaque_id}.png").mode == "RGB"
+    with Image.open(settings.comfyui_output_dir / saved["name"]) as kept:
+        assert kept.mode == "RGBA" and kept.getpixel((0, 0))[3] == 0
+    assert Image.open(io.BytesIO(thumb.content)).mode == "RGBA"

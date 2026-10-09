@@ -1,4 +1,5 @@
-// LUMOS Edit studio: one image, a history of versions, AI tools (Fix, Remove, Extend, Restyle, Upscale) and instant
+// LUMOS Edit studio: one image, a history of versions, AI tools (Fix, Remove, Extend, Background, Faces, Restyle,
+// Upscale) and instant
 // browser tools (crop, rotate, flip, adjust, filters). AI results land in the Gallery automatically;
 // browser edits are drafts until Save.
 
@@ -13,10 +14,21 @@ const FILTERS = {
   fade: { label: "Fade", contrast: 0.8, brightness: 1.08, saturation: 0.82 },
 };
 const TOOL_TITLES = {
-  fix: "Fix part", remove: "Remove object", extend: "Extend", restyle: "Restyle", upscale: "Upscale",
+  fix: "Fix part", remove: "Remove object", extend: "Extend", background: "Background", faces: "Fix faces",
+  restyle: "Restyle", upscale: "Upscale",
   crop: "Crop & rotate", adjust: "Adjust", filters: "Filters",
 };
 const BRUSH_TOOLS = new Set(["fix", "remove"]);
+const BACKGROUND_LABELS = {
+  transparent: "Cut out", white: "White background", black: "Black background", blur: "Blurred background", prompt: "New background",
+};
+const BACKGROUND_INFO = {
+  transparent: "Everything behind the subject becomes see-through (a PNG cut-out). Takes a few seconds.",
+  white: "The subject on plain white: handy for product shots and profile pictures.",
+  black: "The subject on plain black.",
+  blur: "A soft, out-of-focus background, like a phone's portrait mode.",
+  prompt: "The AI paints a new scene behind the subject; the subject stays exactly as it is.",
+};
 const UPSCALE_MAX_SIDE = 768;
 const SHARP_MAX_SIDE = 1024; // ×4 → 4096 px
 const EXTEND_MAX_SIDE = 1024; // the canvas the AI paints on
@@ -41,6 +53,8 @@ export function initEdit(deps) {
     amounts: [...document.querySelectorAll("#edit-view [data-amount]")], extendPrompt: $("#edit-extend-prompt"),
     extendInfo: $("#edit-extend-info"), extendGo: $("#edit-extend-go"),
     scales: [...document.querySelectorAll("#edit-view [data-scale]")],
+    bgModes: [...document.querySelectorAll("#edit-view [data-bg]")], bgPromptBox: $("#edit-bg-prompt-box"),
+    bgPrompt: $("#edit-bg-prompt"), bgInfo: $("#edit-bg-info"), bgGo: $("#edit-bg-go"), facesGo: $("#edit-faces-go"),
     restylePrompt: $("#edit-restyle-prompt"), restyleStrength: $("#edit-restyle-strength"), restyleStrengthValue: $("#edit-restyle-strength-value"),
     restyleStyle: $("#edit-restyle-style"), restyleGo: $("#edit-restyle-go"),
     upscaleInfo: $("#edit-upscale-info"), upscaleGo: $("#edit-upscale-go"),
@@ -52,7 +66,7 @@ export function initEdit(deps) {
 
   const session = {
     versions: [], current: -1, tool: "restyle", adjust: { ...NEUTRAL }, filter: null, crop: null, aspect: null,
-    sides: new Set(["left", "right"]), amount: 0.25, scale: 2,
+    sides: new Set(["left", "right"]), amount: 0.25, scale: 2, background: "transparent",
   };
   const view = { scale: 1, x: 0, y: 0, panning: null };
   const brush = { erasing: false, drawing: false, last: null };
@@ -148,7 +162,9 @@ export function initEdit(deps) {
     el.save.title = draft ? "Save this version to the Gallery" : "This version is already in the Gallery";
     renderUpscale(version);
     renderExtend(version);
-    for (const button of [el.fixGo, el.restyleGo, el.removeGo]) button.disabled = isBusy();
+    for (const button of [el.fixGo, el.restyleGo, el.removeGo, el.bgGo, el.facesGo]) button.disabled = isBusy();
+    el.bgInfo.textContent = BACKGROUND_INFO[session.background];
+    el.bgPromptBox.hidden = session.background !== "prompt";
   }
 
   function renderUpscale(version) {
@@ -411,7 +427,8 @@ export function initEdit(deps) {
   function resultSize(path, version) {
     if (path === "/api/upscale") return [version.width * session.scale, version.height * session.scale];
     if (path === "/api/extend") return extendLayout(version.width, version.height).canvas;
-    if (path === "/api/inpaint" || path === "/api/remove") return [version.width, version.height]; // pasted back at full size
+    const fullSize = ["/api/inpaint", "/api/remove", "/api/background", "/api/faces"];
+    if (fullSize.includes(path)) return [version.width, version.height]; // these keep the picture's full size
     return fitSize(version.width, version.height, deps.liveMaxSide());
   }
 
@@ -480,6 +497,18 @@ export function initEdit(deps) {
     if (!maskId) return;
     await runAiTool("/api/remove", { mask_id: maskId, ...sourceFields(current()) }, "Removed");
     el.mask.getContext("2d").clearRect(0, 0, el.mask.width, el.mask.height);
+  }
+
+  function backgroundNow() {
+    const mode = session.background;
+    const prompt = el.bgPrompt.value.trim();
+    if (mode === "prompt" && !prompt) return toast("Describe the new scene first.", "error");
+    return runAiTool("/api/background", { mode, prompt, ...sourceFields(current()) }, BACKGROUND_LABELS[mode]);
+  }
+
+  function facesNow() {
+    const version = current();
+    return runAiTool("/api/faces", { ...sourceFields(version), parent_name: version.parentName ?? null }, "Faces fixed");
   }
 
   function extendNow() {
@@ -660,6 +689,16 @@ export function initEdit(deps) {
   el.upscaleGo.addEventListener("click", upscaleNow);
   el.removeGo.addEventListener("click", removeNow);
   el.extendGo.addEventListener("click", extendNow);
+  el.bgGo.addEventListener("click", backgroundNow);
+  el.facesGo.addEventListener("click", facesNow);
+  for (const chip of el.bgModes) {
+    chip.addEventListener("click", () => {
+      session.background = chip.dataset.bg;
+      for (const other of el.bgModes) other.setAttribute("aria-checked", String(other === chip));
+      renderPanels();
+      if (session.background === "prompt") el.bgPrompt.focus({ preventScroll: true });
+    });
+  }
   for (const chip of el.scales) {
     chip.addEventListener("click", () => {
       session.scale = Number(chip.dataset.scale);

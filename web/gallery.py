@@ -20,8 +20,8 @@ log = logging.getLogger(__name__)
 THUMB_WIDTH = 320
 KINDS = ("generated", "edited", "fixed", "upscaled")
 _KIND_PREFIXES = (
-    ("ComfyUI_img2img", "edited"), ("LUMOS_edit", "edited"), ("ComfyUI_outpaint", "edited"),
-    ("ComfyUI_inpaint", "fixed"), ("ComfyUI_remove", "fixed"), ("ComfyUI_upscaled", "upscaled"),
+    ("ComfyUI_img2img", "edited"), ("LUMOS_edit", "edited"), ("ComfyUI_outpaint", "edited"), ("ComfyUI_background", "edited"),
+    ("ComfyUI_inpaint", "fixed"), ("ComfyUI_remove", "fixed"), ("ComfyUI_faces", "fixed"), ("ComfyUI_upscaled", "upscaled"),
 )
 EDIT_PREFIX = "LUMOS_edit_"
 
@@ -116,6 +116,11 @@ def _prompt_node(graph: dict[str, Any], sampler: str, name: str) -> str:
     return linked_node(graph, sampler, name, "CLIPTextEncode")
 
 
+def _save_mode(img: Image.Image) -> str:
+    """Keep see-through pixels (cut-outs); everything else is stored as RGB."""
+    return "RGBA" if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info else "RGB"
+
+
 def read_png(path: Path) -> tuple[int, int, dict[str, Any] | None]:
     """Return (width, height, params) for a PNG. Raises OSError if it can't be opened."""
     with Image.open(path) as img:
@@ -169,7 +174,7 @@ class Gallery:
             self.thumb_dir.mkdir(parents=True, exist_ok=True)
             with Image.open(path) as img:
                 img.thumbnail((THUMB_WIDTH, THUMB_WIDTH * 4))
-                img.convert("RGB").save(thumb, "WEBP", quality=80)
+                img.convert(_save_mode(img)).save(thumb, "WEBP", quality=80)
         return thumb
 
     def save_edit(self, source: Path, parent: str | None = None) -> GalleryImage:
@@ -183,7 +188,7 @@ class Gallery:
         numbers = [int(m.group(1)) for p in self.output_dir.glob(f"{EDIT_PREFIX}*.png") if (m := re.search(r"_(\d+)_\.png$", p.name))]
         name = f"{EDIT_PREFIX}{max(numbers, default=0) + 1:05d}_.png"
         with Image.open(source) as img:
-            img.convert("RGB").save(self.output_dir / name, format="PNG", pnginfo=info)
+            img.convert(_save_mode(img)).save(self.output_dir / name, format="PNG", pnginfo=info)
         return self.get(name)
 
     def delete(self, name: str) -> None:

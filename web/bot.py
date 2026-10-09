@@ -26,6 +26,9 @@ COMMANDS = [
     BotCommand("fix", "Photo caption: /fix <what should be there> (draw with the pink pen first)"),
     BotCommand("remove", "Photo caption: /remove (draw over it with the pink pen first)"),
     BotCommand("extend", "Photo caption: /extend [what the new area shows]"),
+    BotCommand("faces", "Photo caption: /faces (clearer, more detailed faces)"),
+    BotCommand("nobg", "Photo caption: /nobg (cut the subject out)"),
+    BotCommand("bg", "Photo caption: /bg white | black | blur | <a new scene>"),
     BotCommand("help", "How to use this bot"),
 ]
 

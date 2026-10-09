@@ -187,3 +187,71 @@ def test_full_size_overlay(tmp_path) -> None:
         "destination": ["14", 0], "source": ["12", 0], "x": 256, "y": 0, "resize_source": False, "mask": ["13", 0],
     }
     assert graph["9"]["inputs"]["images"] == ["15", 0]
+
+
+# --- Phase 3: background and faces ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["transparent", "white", "black", "blur"])
+def test_background_workflow_modes(mode) -> None:
+    from ai_edits import build_background_workflow
+
+    graph = build_background_workflow("src.png", (800, 600), mode)
+    assert graph["3"]["class_type"] == "RemoveBackground" and graph["9"]["inputs"]["images"] == ["5", 0]
+    assert graph["9"]["inputs"]["filename_prefix"] == "ComfyUI_background"
+    if mode == "transparent":
+        assert graph["5"]["class_type"] == "JoinImageWithAlpha" and graph["5"]["inputs"]["alpha"] == ["4", 0]
+        assert graph["4"]["class_type"] == "InvertMask"  # JoinImageWithAlpha inverts: without this the subject vanishes
+    else:
+        composite = graph["5"]["inputs"]
+        assert composite["source"] == ["1", 0] and composite["mask"] == ["3", 0]  # the original subject on top
+    if mode == "white":
+        assert graph["4"]["inputs"] == {"width": 800, "height": 600, "batch_size": 1, "color": 0xFFFFFF}
+    if mode == "blur":
+        assert graph["7"]["inputs"]["sigma"] <= 10  # ImageBlur's limit
+
+
+def test_background_workflow_paints_a_new_background_at_work_size() -> None:
+    from ai_edits import build_background_workflow
+
+    params = GenerationParams("a beach", "people", 768, 576, 25, 7.0, seed=2, model="inpaint.safetensors")
+    graph = build_background_workflow("src.png", (1600, 1200), "prompt", params)
+    assert graph["11"]["inputs"]["width"] == 768 and graph["4"]["inputs"]["width"] == 1600
+    assert graph["20"]["inputs"]["mask"] == ["17", 0] and graph["8"]["inputs"]["denoise"] == 1.0
+    assert graph["5"]["inputs"]["source"] == ["1", 0]
+    read = params_from_graph(graph, size=(1600, 1200))
+    assert read is not None and read["prompt"] == "a beach"
+    with pytest.raises(InvalidParamsError):
+        build_background_workflow("src.png", (800, 600), "sparkles")
+
+
+def test_face_boxes_and_crops() -> None:
+    from ai_edits import face_boxes, face_crops
+
+    mask = Image.new("L", (800, 600), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((100, 100, 160, 180), fill=255)  # face 1
+    draw.ellipse((600, 50, 700, 170), fill=255)  # face 2 (bigger)
+    draw.ellipse((400, 400, 405, 405), fill=255)  # a speck: ignored
+    boxes = face_boxes(mask)
+    assert boxes == [(600, 50, 701, 171), (100, 100, 161, 181)]
+    big, small = face_crops(boxes, (800, 600))
+    x, y, side, _ = big.box
+    assert side == round(121 * 2.2) and y == 0 and x + side <= 800  # pushed inside the picture
+    assert small.work == 512 and big.work == 512
+    assert face_boxes(Image.new("L", (100, 100), 0)) == []
+
+
+def test_face_workflow_chains_one_paste_per_face() -> None:
+    from ai_edits import FACE_DENOISE, FaceCrop, build_face_workflow
+
+    params = GenerationParams("an old man, detailed face", "ugly", 512, 512, 25, 7.0, seed=10, model="dream.safetensors")
+    crops = [FaceCrop((10, 20, 200, 200), 512), FaceCrop((300, 40, 120, 120), 512)]
+    graph = build_face_workflow("src.png", crops, [("w0.png", "p0.png"), ("w1.png", "p1.png")], params)
+    first, second = graph["109"]["inputs"], graph["129"]["inputs"]
+    assert first["destination"] == ["1", 0] and (first["x"], first["y"]) == (10, 20)
+    assert second["destination"] == ["109", 0]
+    assert graph["120"]["inputs"]["image"] == ["109", 0]  # face 2 is cut from face 1's result
+    assert graph["9"]["inputs"]["images"] == ["129", 0]
+    assert graph["105"]["inputs"]["denoise"] == FACE_DENOISE and graph["125"]["inputs"]["seed"] == 11
+    assert graph["107"]["inputs"]["width"] == 200 and graph["127"]["inputs"]["width"] == 120  # back to crop size

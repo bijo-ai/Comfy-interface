@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from ai_edits import extend, remove_object, sharp_upscale
+from ai_edits import BACKGROUND_MODEL, FACE_MODEL, change_background, extend, remove_object, restore_faces, sharp_upscale
 from comfy_client import (
     DEFAULT_NEGATIVE,
     GenerationParams,
@@ -40,7 +40,9 @@ from web.builders import (
     DEFAULT_EXTEND_AMOUNT,
     DEFAULT_STRENGTH,
     SHARP_MODEL,
+    build_background,
     build_extend,
+    build_faces,
     build_generation,
     build_img2img,
     build_inpaint,
@@ -52,8 +54,10 @@ from web.builders import (
 from web.catalog import ModelCatalog
 from web.gallery import KINDS, Gallery, GalleryImage
 from web.jobs import (
+    BackgroundRequest,
     BusyError,
     ExtendRequest,
+    FacesRequest,
     Img2ImgRequest,
     InpaintRequest,
     JobManager,
@@ -106,6 +110,19 @@ class ExtendBody(BaseModel):
     prompt: str = ""  # what the new area shows; empty = more of the same scene
     source_id: str | None = None
     source_name: str | None = None
+
+
+class BackgroundBody(BaseModel):
+    mode: str  # transparent, white, black, blur or prompt
+    prompt: str = ""  # the new background, for mode "prompt"
+    source_id: str | None = None
+    source_name: str | None = None
+
+
+class FacesBody(BaseModel):
+    source_id: str | None = None
+    source_name: str | None = None
+    parent_name: str | None = None  # gallery image a draft came from (its prompt keeps faces true to it)
 
 
 class RemoveBody(BaseModel):
@@ -171,6 +188,10 @@ def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
             result = await remove_object(request.source, request.mask, request.params, settings, on_progress, on_preview)
         elif isinstance(request, SharpUpscaleRequest):
             result = await sharp_upscale(request.source, request.model_name, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, BackgroundRequest):
+            result = await change_background(request.source, request.mode, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, FacesRequest):
+            result = await restore_faces(request.source, request.params, settings, on_progress, on_preview)
         else:
             result = await generate(request, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
@@ -309,6 +330,39 @@ def create_app(
             raise ApiError(422, str(exc)) from exc
         return start_job(request)
 
+    @app.post("/api/background")
+    async def start_background(body: BackgroundBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = resolve_source(gallery, body.source_id, body.source_name)
+        if source is None:
+            raise ApiError(422, "Choose the image.")
+        try:
+            request = build_background(
+                source=source, mode=body.mode, prompt=body.prompt, available=await catalog.available(),
+                removers=await catalog.files("background_removal"),
+            )
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
+    @app.post("/api/faces")
+    async def start_faces(body: FacesBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = resolve_source(gallery, body.source_id, body.source_name)
+        if source is None:
+            raise ApiError(422, "Choose the image.")
+        parent = body.source_name or body.parent_name
+        with image_errors():
+            parent_params = gallery.get(parent).params if parent else None
+        try:
+            request = build_faces(
+                source=source, parent_params=parent_params, available=await catalog.available(),
+                detectors=await catalog.files("detection"),
+            )
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
     @app.post("/api/remove")
     async def start_remove(body: RemoveBody) -> dict[str, str]:
         gallery = await require_gallery()
@@ -411,6 +465,8 @@ def create_app(
             "default": default.key if default else None,
             "inpaint": profile_by_key(INPAINT_KEY) in available,
             "sharp": SHARP_MODEL in await catalog.upscalers(),
+            "background": BACKGROUND_MODEL in await catalog.files("background_removal"),
+            "faces": FACE_MODEL in await catalog.files("detection"),
             "styles": [{"key": s.key, "label": s.label, "emoji": s.emoji} for s in STYLES],
         }
 

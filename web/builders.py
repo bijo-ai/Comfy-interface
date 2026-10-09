@@ -6,13 +6,28 @@ from pathlib import Path
 
 from PIL import Image
 
-from ai_edits import EXTEND_NEGATIVE, EXTEND_PROMPT, REMOVE_NEGATIVE, REMOVE_PROMPT, extend_layout, remove_images
+from ai_edits import (
+    BACKGROUND_MODEL,
+    BACKGROUND_MODES,
+    BACKGROUND_NEGATIVE,
+    EXTEND_NEGATIVE,
+    EXTEND_PROMPT,
+    FACE_MODEL,
+    FACE_NEGATIVE,
+    FACE_PROMPT,
+    REMOVE_NEGATIVE,
+    REMOVE_PROMPT,
+    extend_layout,
+    remove_images,
+)
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError, fit_size, inpaint_masks
 from models import INPAINT_KEY, ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import apply_style
 from web.gallery import GalleryImage
 from web.jobs import (
+    BackgroundRequest,
     ExtendRequest,
+    FacesRequest,
     Img2ImgRequest,
     InpaintRequest,
     RemoveRequest,
@@ -195,6 +210,47 @@ def build_sharp_upscale(source: Path, parent_params: dict | None, upscalers: lis
         width, height, seed=parent.get("seed"), model=parent.get("model"),
     )
     return SharpUpscaleRequest(source=source, model_name=SHARP_MODEL, params=params)
+
+
+def build_background(
+    *, source: Path, mode: str, prompt: str, available: list[ModelProfile], removers: list[str],
+) -> BackgroundRequest:
+    """Plan a background change: cut out, plain colour, blur, or a newly painted background (`prompt`)."""
+    if mode not in BACKGROUND_MODES:
+        raise InvalidParamsError(f"Choose a background: {', '.join(BACKGROUND_MODES)}.")
+    if BACKGROUND_MODEL not in removers:
+        raise InvalidParamsError("Background removal needs the BiRefNet model, which isn't installed in ComfyUI.")
+    size = _image_size(source)
+    if mode != "prompt":
+        return BackgroundRequest(source=source, mode=mode, params=GenerationParams("background", width=size[0], height=size[1]))
+    if not prompt.strip():
+        raise InvalidParamsError("Describe the new background, e.g. a sunny beach.")
+    profile = _inpainter(available, "A new background")
+    width, height = fit_size(*size, IMG2IMG_MAX_SIDE["sd15"])
+    params = GenerationParams(prompt.strip(), BACKGROUND_NEGATIVE, width, height, profile.steps, profile.cfg, model=profile.ckpt)
+    params.validate()
+    return BackgroundRequest(source=source, mode=mode, params=params)
+
+
+def build_faces(
+    *, source: Path, parent_params: dict | None, available: list[ModelProfile], detectors: list[str],
+) -> FacesRequest:
+    """Plan a face fix: every face is found and repainted in detail with an SD 1.5 model."""
+    if FACE_MODEL not in detectors:
+        raise InvalidParamsError("Fixing faces needs the MediaPipe face model, which isn't installed in ComfyUI.")
+    _image_size(source)  # raises if the picture can't be read
+    profile = _upscale_fallback(available)  # a normal SD 1.5 model (DreamShaper first)
+    prompt = _face_prompt((parent_params or {}).get("prompt"))
+    params = GenerationParams(prompt, FACE_NEGATIVE, 512, 512, profile.steps, profile.cfg, model=profile.ckpt)
+    return FacesRequest(source=source, params=params)
+
+
+def _face_prompt(subject: str | None) -> str:
+    """The picture's own prompt keeps age, look and style; prompts written by the edit tools themselves don't help."""
+    subject = (subject or "").replace(f", {FACE_PROMPT}", "").strip()
+    if not subject or subject in (FACE_PROMPT, EXTEND_PROMPT, REMOVE_PROMPT):
+        return FACE_PROMPT
+    return f"{subject}, {FACE_PROMPT}"
 
 
 def _inpainter(available: list[ModelProfile], tool: str) -> ModelProfile:

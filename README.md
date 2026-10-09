@@ -80,6 +80,12 @@ A local website for generating and browsing images without an LLM. Type a prompt
   - **Full resolution:** the AI works at a GPU-safe size, but Fix, Remove and Extend paste their result back onto
     the full-size original, so only the painted or new area changes and the picture never shrinks (Extend's
     result is capped at 2048 px).
+  - **🌄 Background:** ✂️ cut out (transparent PNG) · ⬜ white · ⬛ black · 🌫️ blur · ✨ a new scene you describe.
+    BiRefNet finds the subject; the subject keeps every pixel. **😊 Faces:** finds every face (MediaPipe, up to 6)
+    and redraws each one larger and in detail, using the picture's own prompt so age and look stay the same.
+  - **Background and Faces need** `birefnet.safetensors` (models/background_removal, from
+    huggingface.co/Comfy-Org/BiRefNet) and `mediapipe_face_fp32.safetensors` (models/detection, from
+    huggingface.co/Comfy-Org/mediapipe).
   - **×4 Sharp needs** `RealESRGAN_x4plus.safetensors` in ComfyUI's `models/upscale_models`
     (from huggingface.co/Comfy-Org/Real-ESRGAN_repackaged).
   - **Instant tools (no GPU):** ✂️ **Crop** (Free · 1:1 · 4:5 · 3:2 · 16:9 · 9:16; drag to draw or move), rotate,
@@ -170,6 +176,10 @@ How it behaves:
 | a photo you **drew on with the pink pen**, captioned `/fix a red beanie hat` | only the scribbled area changes (inpainting), after you confirm a preview |
 | a photo you **drew on with the pink pen**, captioned `/remove` | the scribbled thing disappears, after you confirm a preview |
 | a photo captioned `/extend` (optionally `/extend a sandy beach`) | **↔️ Wider · ↕️ Taller · ⛶ All sides** buttons, then the picture grows that way |
+| a photo captioned `/faces` | clearer, more detailed faces |
+| a photo captioned `/nobg` | the subject cut out, sent as a PNG file so the transparency survives |
+| a photo captioned `/bg white` (or `black`, `blur`, or a scene like `/bg a sunny beach`) | the same subject on a new background |
+| **😊 Faces** / **🌄 Background** under an image | fix that image's faces, or pick a new background for it |
 | **↔️ Extend** / **🔎 Sharp ×4** under an image | extend that image, or a crisp 4× larger file (images up to 1024 px) |
 
 **`/fix` in Telegram:**

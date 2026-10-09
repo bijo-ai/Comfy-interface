@@ -118,6 +118,8 @@
         <button type="button" class="tool" data-tool="fix" aria-pressed="false"><span aria-hidden="true">🖌️</span>Fix</button>
         <button type="button" class="tool" data-tool="remove" aria-pressed="false"><span aria-hidden="true">🧽</span>Remove</button>
         <button type="button" class="tool" data-tool="extend" aria-pressed="false"><span aria-hidden="true">↔️</span>Extend</button>
+        <button type="button" class="tool" data-tool="background" aria-pressed="false"><span aria-hidden="true">🌄</span>Background</button>
+        <button type="button" class="tool" data-tool="faces" aria-pressed="false"><span aria-hidden="true">😊</span>Faces</button>
         <button type="button" class="tool" data-tool="restyle" aria-pressed="true"><span aria-hidden="true">🎨</span>Restyle</button>
         <button type="button" class="tool" data-tool="upscale" aria-pressed="false"><span aria-hidden="true">🔍</span>Upscale</button>
         <span class="tool-divider" aria-hidden="true"></span>
@@ -199,6 +201,28 @@
           <button id="edit-extend-go" class="generate" type="button"><span class="generate-label">Extend</span></button>
         </div>
 
+        <div data-panel="background" hidden>
+          <p class="muted">Finds the subject and changes what's behind it. The subject itself keeps every pixel.</p>
+          <div class="chips edit-bg-modes" role="radiogroup" aria-label="New background">
+            <button type="button" class="chip" role="radio" data-bg="transparent" aria-checked="true">✂️ Nothing (cut out)</button>
+            <button type="button" class="chip" role="radio" data-bg="white" aria-checked="false">⬜ White</button>
+            <button type="button" class="chip" role="radio" data-bg="black" aria-checked="false">⬛ Black</button>
+            <button type="button" class="chip" role="radio" data-bg="blur" aria-checked="false">🌫️ Blur</button>
+            <button type="button" class="chip" role="radio" data-bg="prompt" aria-checked="false">✨ New scene</button>
+          </div>
+          <div id="edit-bg-prompt-box" class="edit-field" hidden>
+            <label class="label" for="edit-bg-prompt">Describe the new scene</label>
+            <textarea id="edit-bg-prompt" rows="2" placeholder="a sunny beach at golden hour"></textarea>
+          </div>
+          <p id="edit-bg-info" class="muted"></p>
+          <button id="edit-bg-go" class="generate" type="button"><span class="generate-label">Change background</span></button>
+        </div>
+
+        <div data-panel="faces" hidden>
+          <p class="muted">Finds every face (up to 6) and redraws it in detail: sharper eyes, cleaner features, the same person. Best on faces that came out small or smudged.</p>
+          <button id="edit-faces-go" class="generate" type="button"><span class="generate-label">Fix faces</span></button>
+        </div>
+
         <div data-panel="restyle">
           <p class="muted">Repaint the whole picture following your words. Lower strength keeps more of the original.</p>
           <label class="label" for="edit-restyle-prompt">Describe the picture</label>
@@ -254,7 +278,7 @@
           <button id="edit-filter-apply" class="generate" type="button">Apply filter</button>
         </div>
 
-        <p class="muted note edit-note">AI steps (Fix, Remove, Extend, Restyle, Upscale) are saved to the Gallery automatically. Crops, adjustments and filters are drafts (•) until you press 💾 Save.</p>
+        <p class="muted note edit-note">AI steps (Fix, Remove, Extend, Background, Faces, Restyle, Upscale) are saved to the Gallery automatically. Crops, adjustments and filters are drafts (•) until you press 💾 Save.</p>
       </aside>
     </div>
   </section>

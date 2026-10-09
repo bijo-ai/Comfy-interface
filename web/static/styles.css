@@ -466,6 +466,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .extend-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .extend-sides [data-side="top"], .extend-sides [data-side="bottom"] { grid-column: 1 / -1; }
 .faint { color: var(--faint); }
+.edit-field { display: flex; flex-direction: column; gap: 10px; }
+.edit-bg-modes .chip { flex: 1 1 calc(50% - 6px); }
+.edit-bg-modes .chip[data-bg="transparent"] { flex-basis: 100%; }
+/* see-through pictures (cut-outs) sit on a quiet checkerboard */
+.edit-frame { background: repeating-conic-gradient(#2a2c38 0% 25%, #1c1d27 0% 50%) 0 0 / calc(24px / var(--scale, 1)) calc(24px / var(--scale, 1)); }
 .edit-brush-tools { display: flex; flex-direction: column; gap: 10px; }
 .edit-upscale-kinds .chip { flex: 1 1 0; }
 .edit-live-host { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 2; }

@@ -72,6 +72,10 @@ class FakeCatalog:
     async def upscalers(self):
         return ["RealESRGAN_x4plus.safetensors"]
 
+    async def files(self, folder):
+        return {"upscale_models": ["RealESRGAN_x4plus.safetensors"], "background_removal": ["birefnet.safetensors"],
+                "detection": ["mediapipe_face_fp32.safetensors"]}.get(folder, [])
+
     async def available(self):
         return available_profiles(self.ckpts)
 
@@ -92,7 +96,7 @@ def make_bot(tmp_path: Path, runner, allowed: int | None = USER, ckpts=(DREAM, S
     return bot
 
 
-SINGLE_RESULT = ("InpaintRequest", "ExtendRequest", "RemoveRequest", "SharpUpscaleRequest")
+SINGLE_RESULT = ("InpaintRequest", "ExtendRequest", "RemoveRequest", "SharpUpscaleRequest", "FacesRequest", "BackgroundRequest")
 
 
 def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
@@ -183,7 +187,7 @@ def test_plain_text_uses_default_model_and_sends_photo_with_buttons(tmp_path, mo
     _, path, caption, buttons = chat.calls[2]
     assert path == (tmp_path / "img1_0.png").resolve()
     assert caption == "a beach\n\nseed 1234 · 512×512 · DreamShaper 8 · 5.5s"
-    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp"]
+    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp", "faces", "bgm"]
     assert chat.calls[3] == ("delete", status_id)
 
 
@@ -208,7 +212,7 @@ def test_model_and_style_choice_persist(tmp_path, make_png) -> None:
     assert params.prompt.startswith("a cat, ") and "anime" in params.prompt
     photo_buttons = chat.last("send_photo")[3]
     # SDXL portrait: no ×4 variations or ×2 upscale (too heavy), and 1216 px is too tall for sharp ×4
-    assert [data.split(":")[0] for data in button_data(photo_buttons)] == ["vary", "ext"]
+    assert [data.split(":")[0] for data in button_data(photo_buttons)] == ["vary", "ext", "faces", "bgm"]
 
 
 def test_choosing_missing_model_is_refused(tmp_path) -> None:
@@ -480,7 +484,7 @@ def test_photo_with_caption_runs_img2img(tmp_path, make_png) -> None:
     assert (request.params.width, request.params.height) == (768, 576)
     assert request.source.parent == tmp_path / "sources"
     buttons = chat.last("send_photo")[3]
-    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp"]
+    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp", "faces", "bgm"]
 
 
 def test_vary_and_x4_of_img2img_keep_the_start_image(tmp_path, make_png) -> None:
@@ -573,7 +577,7 @@ def test_fix_with_scribble_previews_then_inpaints(tmp_path, make_png) -> None:
     with Image.open(request.mask) as mask:
         assert mask.convert("L").getpixel((400, 62)) == 255 and mask.convert("L").getpixel((400, 500)) == 0
     result_buttons = chat.last("send_photo")[3]
-    assert [data.split(":")[0] for data in button_data(result_buttons)] == ["vary", "up", "ext", "sharp"]  # no ×4 for fixes
+    assert [data.split(":")[0] for data in button_data(result_buttons)] == ["vary", "up", "ext", "sharp", "faces", "bgm"]  # no ×4 for fixes
 
 
 def test_fix_without_scribble_offers_area_buttons(tmp_path, make_png) -> None:
@@ -697,3 +701,63 @@ def test_result_buttons_extend_and_sharp(tmp_path, make_png) -> None:
     assert isinstance(sharp, SharpUpscaleRequest) and (sharp.params.width, sharp.params.height) == (512, 512)
     assert isinstance(extended, ExtendRequest) and extended.source == (tmp_path / "img1_0.png").resolve()
     assert extended.layout.box[:2] != (0, 0)
+
+
+# --- /faces, /nobg, /bg and the 😊 / 🌄 buttons ----------------------------------------------------------
+
+from web.jobs import BackgroundRequest, FacesRequest  # noqa: E402
+
+
+
+def test_photo_commands_faces_nobg_bg(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_bytes(), "/faces", chat)
+        assert chat.last("send_photo")[2].startswith("😊 Faces fixed · 512×512")
+        await bot.handle_photo(USER, photo_bytes(), "/nobg", chat)
+        assert chat.last("send_document")[2].startswith("✂️ Cut out")  # a file keeps the transparency
+        await bot.handle_photo(USER, photo_bytes(), "/bg Blur", chat)
+        await bot.handle_photo(USER, photo_bytes(), "/bg a sunny beach", chat)
+        await bot.handle_photo(USER, photo_bytes(), "/bg", chat)
+
+    asyncio.run(scenario())
+    faces, cut, blurred, painted = seen
+    assert isinstance(faces, FacesRequest) and faces.params.prompt.startswith("detailed face")
+    assert [r.mode for r in (cut, blurred, painted)] == ["transparent", "blur", "prompt"]
+    assert painted.params.prompt == "a sunny beach" and painted.params.model == INPAINT
+    assert "Describe the new background" in chat.texts()[-1]
+
+
+def test_result_buttons_faces_and_background(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = make_bot(tmp_path, done_runner(seen, make_png, tmp_path), ckpts=(DREAM, INPAINT)), FakeChat()
+
+    async def scenario():
+        await bot.handle_text(USER, "an old fisherman", chat)
+        buttons = dict((data.split(":")[0], data) for data in button_data(chat.last("send_photo")[3]))
+        await bot.handle_button(USER, buttons["faces"], chat)
+        await bot.handle_button(USER, button_data(chat.last("send_photo")[3])[0], chat)  # 🔁 Vary the face fix
+        await bot.handle_button(USER, buttons["bgm"], chat)
+        _, text, _, choices = next(c for c in reversed(chat.calls) if c[0] == "send_text")
+        assert "behind the subject" in text
+        assert [data.rsplit(":", 1)[1] for data in button_data(choices)[:4]] == ["transparent", "white", "black", "blur"]
+        await bot.handle_button(USER, button_data(choices)[1], chat)  # ⬜ White
+
+    asyncio.run(scenario())
+    _, faces, varied, white = seen
+    assert isinstance(faces, FacesRequest) and faces.params.prompt.startswith("an old fisherman, detailed face")
+    assert isinstance(varied, FacesRequest) and varied.params.prompt == faces.params.prompt  # not doubled
+    assert varied.source == faces.source and varied.params.seed is None
+    assert isinstance(white, BackgroundRequest) and white.mode == "white"
+    assert white.source == (tmp_path / "img1_0.png").resolve()
+
+
+def test_face_prompt_ignores_the_edit_tools_own_prompts() -> None:
+    from ai_edits import EXTEND_PROMPT, FACE_PROMPT, REMOVE_PROMPT
+    from web.builders import _face_prompt
+
+    assert _face_prompt("an old man") == f"an old man, {FACE_PROMPT}"
+    assert _face_prompt(f"an old man, {FACE_PROMPT}") == f"an old man, {FACE_PROMPT}"
+    assert _face_prompt(REMOVE_PROMPT) == _face_prompt(EXTEND_PROMPT) == _face_prompt(None) == FACE_PROMPT

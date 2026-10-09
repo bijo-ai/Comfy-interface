@@ -16,6 +16,15 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _ID = re.compile(r"[0-9a-f]{32}")
 
 
+def _keep_transparency(img: Image.Image) -> Image.Image:
+    """RGBA when the picture really has see-through pixels (a cut-out), otherwise RGB."""
+    if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info:
+        rgba = img.convert("RGBA")
+        if rgba.getchannel("A").getextrema()[0] < 255:
+            return rgba
+    return img.convert("RGB")
+
+
 class SourceStore:
     def __init__(self, folder: Path) -> None:
         self.folder = folder
@@ -27,7 +36,7 @@ class SourceStore:
         try:
             with Image.open(BytesIO(data)) as img:
                 img.load()
-                picture = img.convert("RGB")
+                picture = _keep_transparency(img)
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
             raise InvalidParamsError("That file isn't an image Studio can read.") from exc
         picture.thumbnail((STORE_MAX_SIDE, STORE_MAX_SIDE), Image.Resampling.LANCZOS)

@@ -21,15 +21,14 @@ class ModelCatalog:
         self,
         base_url: str,
         fetch: Callable[[], Awaitable[list[str]]] | None = None,
-        fetch_upscalers: Callable[[], Awaitable[list[str]]] | None = None,
+        fetch_files: Callable[[str], Awaitable[list[str]]] | None = None,
     ) -> None:
         self._base_url = base_url
         self._fetch = fetch or self._fetch_checkpoints
-        self._fetch_upscalers = fetch_upscalers or self._fetch_upscale_models
+        self._fetch_files = fetch_files or self._fetch_model_files
         self._cached: list[ModelProfile] = []
         self._fetched_at = float("-inf")
-        self._upscalers: list[str] = []
-        self._upscalers_at = float("-inf")
+        self._files: dict[str, tuple[float, list[str]]] = {}
 
     async def available(self) -> list[ModelProfile]:
         if time.monotonic() - self._fetched_at < CACHE_SECONDS:
@@ -43,21 +42,25 @@ class ModelCatalog:
         self._fetched_at = time.monotonic()
         return self._cached
 
-    async def upscalers(self) -> list[str]:
-        """Upscaling model files (ComfyUI's models/upscale_models)."""
-        if time.monotonic() - self._upscalers_at < CACHE_SECONDS:
-            return self._upscalers
+    async def files(self, folder: str) -> list[str]:
+        """Model files in one of ComfyUI's model folders (upscale_models, background_removal, detection...)."""
+        fetched_at, names = self._files.get(folder, (float("-inf"), []))
+        if time.monotonic() - fetched_at < CACHE_SECONDS:
+            return names
         try:
-            self._upscalers = await self._fetch_upscalers()
+            names = await self._fetch_files(folder)
         except (ComfyUIError, httpx.HTTPError, KeyError, ValueError) as exc:
-            log.debug("Could not list upscaling models: %s", exc)
+            log.debug("Could not list %s: %s", folder, exc)
             return []
-        self._upscalers_at = time.monotonic()
-        return self._upscalers
+        self._files[folder] = (time.monotonic(), names)
+        return names
 
-    async def _fetch_upscale_models(self) -> list[str]:
+    async def upscalers(self) -> list[str]:
+        return await self.files("upscale_models")
+
+    async def _fetch_model_files(self, folder: str) -> list[str]:
         async with httpx.AsyncClient(timeout=5) as http:
-            return await ComfyClient(self._base_url, http).list_upscale_models()
+            return await ComfyClient(self._base_url, http).list_model_files(folder)
 
     async def _fetch_checkpoints(self) -> list[str]:
         async with httpx.AsyncClient(timeout=5) as http:
