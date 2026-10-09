@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ai_edits import ExtendLayout
 from comfy_client import ComfyUIError, GenerationParams, PreviewCallback, ProgressCallback
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,30 @@ class InpaintRequest:
     params: GenerationParams  # prompt for the painted area, size (fitted), inpainting model
 
 
-JobRequest = GenerationParams | UpscaleRequest | Img2ImgRequest | InpaintRequest
+@dataclass(frozen=True)
+class ExtendRequest:
+    source: Path  # image to extend
+    layout: ExtendLayout  # new canvas size and where the picture sits on it
+    params: GenerationParams  # prompt for the new area, canvas size, inpainting model
+
+
+@dataclass(frozen=True)
+class RemoveRequest:
+    source: Path  # image to clean up
+    mask: Path  # white = remove
+    params: GenerationParams  # fixed "empty background" prompt, size (fitted), inpainting model
+
+
+@dataclass(frozen=True)
+class SharpUpscaleRequest:
+    source: Path
+    model_name: str  # file in ComfyUI's models/upscale_models
+    params: GenerationParams  # source size (and the parent's prompt, for the caption)
+
+
+JobRequest = (
+    GenerationParams | UpscaleRequest | Img2ImgRequest | InpaintRequest | ExtendRequest | RemoveRequest | SharpUpscaleRequest
+)
 Runner = Callable[[JobRequest, ProgressCallback, PreviewCallback], Awaitable[dict[str, Any]]]
 KEEP_FINISHED_JOBS = 20
 

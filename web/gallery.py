@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 THUMB_WIDTH = 320
 KINDS = ("generated", "edited", "fixed", "upscaled")
 _KIND_PREFIXES = (
-    ("ComfyUI_img2img", "edited"), ("LUMOS_edit", "edited"), ("ComfyUI_inpaint", "fixed"), ("ComfyUI_upscaled", "upscaled"),
+    ("ComfyUI_img2img", "edited"), ("LUMOS_edit", "edited"), ("ComfyUI_outpaint", "edited"),
+    ("ComfyUI_inpaint", "fixed"), ("ComfyUI_remove", "fixed"), ("ComfyUI_upscaled", "upscaled"),
 )
 EDIT_PREFIX = "LUMOS_edit_"
 
@@ -100,11 +101,19 @@ def _graph_layout(graph: dict[str, Any], size: tuple[int, int] | None) -> tuple[
         if size is None:
             raise
         sampler = find_single_node(graph, "KSampler")
-        positive = linked_node(graph, sampler, "positive", "CLIPTextEncode")
-        negative = linked_node(graph, sampler, "negative", "CLIPTextEncode")
+        positive = _prompt_node(graph, sampler, "positive")
+        negative = _prompt_node(graph, sampler, "negative")
         return sampler, positive, negative, size[0], size[1]
     latent = graph[roles.latent]["inputs"]
     return roles.sampler, roles.positive, roles.negative, latent["width"], latent["height"]
+
+
+def _prompt_node(graph: dict[str, Any], sampler: str, name: str) -> str:
+    """The CLIPTextEncode feeding the sampler, looking through an InpaintModelConditioning (Extend, Remove)."""
+    link = graph[sampler]["inputs"][name]
+    if isinstance(link, list) and graph.get(link[0], {}).get("class_type") == "InpaintModelConditioning":
+        return linked_node(graph, link[0], name, "CLIPTextEncode")
+    return linked_node(graph, sampler, name, "CLIPTextEncode")
 
 
 def read_png(path: Path) -> tuple[int, int, dict[str, Any] | None]:

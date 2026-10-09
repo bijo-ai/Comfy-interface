@@ -36,7 +36,7 @@ const painter = {
 };
 const state = {
   images: [], total: 0, busy: false, currentName: null, stageName: null, galleryUnavailable: false,
-  models: [], model: null, modelSignature: "", style: "none", count: 1, source: null, inpaint: false,
+  models: [], model: null, modelSignature: "", style: "none", count: 1, source: null, inpaint: false, sharp: false,
   painting: null, // { source fields, width, height } while the painter is open
   stageImages: [], // what the stage shows (one image, or a ×4 grid)
   lbList: [], // the list the lightbox steps through (the filtered gallery, or the stage's images)
@@ -100,6 +100,8 @@ async function loadModels() {
   state.styles = data.styles;
   if (!els.styles.children.length) renderStyles(data.styles);
   setInpaintAvailable(Boolean(data.inpaint));
+  state.sharp = Boolean(data.sharp);
+  editor?.refresh();
   const available = data.models.filter((model) => model.available);
   const signature = available.map((model) => model.key).join(",");
   if (!available.length || signature === state.modelSignature) return;
@@ -1013,6 +1015,7 @@ editor = initEdit({
     refreshCounts();
   },
   isBusy: () => state.busy,
+  hasSharp: () => state.sharp,
 });
 
 els.negative.value = DEFAULT_NEGATIVE;

@@ -1,4 +1,5 @@
-"""Telegram bot behaviour without the Telegram library: access control, commands, models, styles, ×4 and upscale.
+"""Telegram bot behaviour without the Telegram library: access control, commands, models, styles, ×4, upscale,
+/fix, /extend and /remove.
 
 The owner (TELEGRAM_ALLOWED_USER_ID) approves anyone else who wants to use the bot.
 """
@@ -20,17 +21,33 @@ from PIL import Image
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError
 from models import INPAINT_KEY, SD15_SHAPES, ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import STYLES, style_by_key
+from ai_edits import ExtendLayout
 from web.builders import (
+    DEFAULT_EXTEND_AMOUNT,
     DEFAULT_STRENGTH,
     FALLBACK_LIMITS,
+    SHARP_MAX_SIDE,
     UPSCALE_MAX_SIDE,
+    build_extend,
     build_generation,
     build_img2img,
     build_inpaint,
+    build_remove,
+    build_sharp_upscale,
     build_upscale,
     resolve_profile,
 )
-from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, UpscaleRequest
+from web.jobs import (
+    BusyError,
+    ExtendRequest,
+    Img2ImgRequest,
+    InpaintRequest,
+    JobManager,
+    JobRequest,
+    RemoveRequest,
+    SharpUpscaleRequest,
+    UpscaleRequest,
+)
 from web.scribble import REGIONS, find_scribble, region_mask
 from web.sources import SourceStore
 from web.users import UserStore
@@ -51,8 +68,10 @@ HELP = (
     "• /model → choose the model\n"
     "• /style → choose a style\n"
     "• send a photo with a caption (e.g. \"make it winter\") → edit that photo\n"
-    "• draw on a photo with Telegram's pink pen, caption it /fix red beanie hat → change only that area\n\n"
-    "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2."
+    "• draw on a photo with Telegram's pink pen, caption it /fix red beanie hat → change only that area\n"
+    "• draw over something with the pink pen, caption it /remove → it disappears\n"
+    "• send a photo captioned /extend → make it wider, taller or bigger all round\n\n"
+    "Under each image: 🔁 Vary · 🖼️ ×4 variations · 🔍 Upscale ×2 · ↔️ Extend · 🔎 Sharp ×4."
 )
 OWNER_HELP = "\n• /users → see and remove the people you've let in"
 BUSY = "⏳ Busy with another image. Try again in a moment."
@@ -66,6 +85,16 @@ WELCOME = (
 )
 DENIED_NOTICE = "Sorry, the owner didn't approve access to this bot."
 FIX_HINT = "Add what should be there after /fix, e.g. /fix a red beanie hat"
+REMOVE_HINT = (
+    "I didn't find a pink scribble on the photo. Draw over what should go with Telegram's pink pen, "
+    "then send it again with the caption /remove"
+)
+EXTEND_QUESTION = "Which way should I extend the picture?"
+EXTEND_CHOICES = {
+    "w": ({"left", "right"}, "↔️ Wider"),
+    "t": ({"top", "bottom"}, "↕️ Taller"),
+    "a": ({"left", "top", "right", "bottom"}, "⛶ All sides"),
+}
 FIX_CANCELLED = "Cancelled. Nothing was changed."
 NEED_CAPTION = 'Add a caption to the photo describing the change, e.g. "make it winter" or "as an oil painting".'
 
@@ -85,6 +114,7 @@ class GalleryLookup(Protocol):
 
 class Catalog(Protocol):
     async def available(self) -> list[ModelProfile]: ...
+    async def upscalers(self) -> list[str]: ...
 
 
 def command_name(text: str) -> str | None:
@@ -124,7 +154,9 @@ class Action:
     user_id: int  # buttons only work for the person they were sent to
     source: Path | None = None  # start image when the result came from image-to-image
     strength: float = 0.0
-    mask: Path | None = None  # painted area when the result came from /fix (inpainting)
+    mask: Path | None = None  # painted area when the result came from /fix (inpainting) or /remove
+    layout: ExtendLayout | None = None  # canvas when the result came from /extend
+    tool: str = ""  # "extend" / "remove" for those results (🔁 Vary repeats the same edit)
 
 
 class ActionStore:
@@ -137,9 +169,10 @@ class ActionStore:
     def put(
         self, params: GenerationParams, image_name: str | None, user_id: int,
         source: Path | None = None, strength: float = 0.0, mask: Path | None = None,
+        layout: ExtendLayout | None = None, tool: str = "",
     ) -> str:
         token = uuid.uuid4().hex[:16]
-        self._items[token] = Action(params, image_name, user_id, source, strength, mask)
+        self._items[token] = Action(params, image_name, user_id, source, strength, mask, layout, tool)
         while len(self._items) > self._keep:
             self._items.popitem(last=False)
         return token
@@ -151,12 +184,13 @@ class ActionStore:
 
 @dataclass(frozen=True)
 class PendingFix:
-    """A /fix photo waiting for the person to confirm the marked area (or pick one)."""
+    """A /fix, /remove or /extend photo waiting for the person to confirm the marked area (or pick an option)."""
 
     source: Path
-    mask: Path | None  # None: no scribble found, waiting for an area button
+    mask: Path | None  # None: no scribble found (/fix: waiting for an area button), or /extend
     prompt: str
     user_id: int
+    tool: str = "fix"
 
 
 class StudioBot:
@@ -217,8 +251,17 @@ class StudioBot:
         if self.sources is None:
             await chat.send_text("⚠️ Photo editing isn't set up on this bot.")
             return
-        if command_name(caption) == "fix":
-            await self._start_fix(parse_request(caption)[1], data, chat, user_id)
+        command = command_name(caption)
+        if command in ("fix", "remove", "extend"):
+            source = self._keep_photo(data)
+            if source is None:
+                await chat.send_text("⚠️ That photo can't be read. Send it as a normal photo (JPEG or PNG).")
+            elif command == "fix":
+                await self._start_fix(parse_request(caption)[1], source, chat, user_id)
+            elif command == "remove":
+                await self._start_remove(source, chat, user_id)
+            else:
+                await self._ask_extend(source, parse_request(caption)[1], chat, user_id)
             return
         prefs = self.prefs_for(user_id)
         try:
@@ -244,7 +287,7 @@ class StudioBot:
         if not await self._admitted(user_id, who, chat):
             return
         kind, _, value = data.partition(":")
-        if kind in ("fixok", "fixno", "area"):
+        if kind in ("fixok", "fixno", "area", "rmok", "exd"):
             await self._continue_fix(kind, value, chat, user_id)
         elif kind in ("allow", "deny", "remove"):
             if user_id == self.owner_id and value.isdigit():
@@ -253,7 +296,7 @@ class StudioBot:
             await self._choose_model(value, self.prefs_for(user_id), chat)
         elif kind == "style":
             await self._choose_style(value, self.prefs_for(user_id), chat)
-        elif kind in ("vary", "x4", "up"):
+        elif kind in ("vary", "x4", "up", "sharp", "ext"):
             action = self.actions.get(value, user_id)
             if action is None:
                 await chat.send_text(EXPIRED)
@@ -261,23 +304,33 @@ class StudioBot:
                 await self._run(self._again(action, batch=1), chat, user_id)
             elif kind == "x4":
                 await self._four_more(action, chat, user_id)
+            elif kind == "sharp":
+                await self._sharp(action, chat, user_id)
+            elif kind == "ext":
+                await self._extend_result(action, chat, user_id)
             else:
                 await self._upscale(action, chat, user_id)
 
     # --- /fix (inpainting from a photo) -----------------------------------------
 
-    async def _start_fix(self, prompt: str, data: bytes, chat: Chat, user_id: int) -> None:
+    def _keep_photo(self, data: bytes) -> Path | None:
+        try:
+            return self.sources.path(self.sources.save(data))
+        except InvalidParamsError:
+            return None
+
+    async def _has_inpainter(self, command: str, chat: Chat) -> bool:
+        inpainter = profile_by_key(INPAINT_KEY)
+        if inpainter in await self.catalog.available():
+            return True
+        await chat.send_text(f"⚠️ /{command} needs the {inpainter.label} model, which isn't installed in ComfyUI.")
+        return False
+
+    async def _start_fix(self, prompt: str, source: Path, chat: Chat, user_id: int) -> None:
         if not prompt:
             await chat.send_text(FIX_HINT)
             return
-        inpainter = profile_by_key(INPAINT_KEY)
-        if inpainter not in await self.catalog.available():
-            await chat.send_text(f"⚠️ /fix needs the {inpainter.label} model, which isn't installed in ComfyUI.")
-            return
-        try:
-            source = self.sources.path(self.sources.save(data))
-        except InvalidParamsError as exc:
-            await chat.send_text(f"⚠️ {exc}")
+        if not await self._has_inpainter("fix", chat):
             return
         marked = find_scribble(source)
         if marked is None:
@@ -297,6 +350,37 @@ class StudioBot:
             [[("✅ Fix this area", f"fixok:{token}"), ("❌ Cancel", f"fixno:{token}")]],
         )
 
+    async def _start_remove(self, source: Path, chat: Chat, user_id: int) -> None:
+        if not await self._has_inpainter("remove", chat):
+            return
+        marked = find_scribble(source)
+        if marked is None:
+            await chat.send_text(REMOVE_HINT)
+            return
+        mask = self.sources.path(self.sources.save(_png(marked)))
+        preview = self.sources.path(self.sources.save(_highlight(source, marked)))
+        token = self._put_fix(PendingFix(source, mask, "", user_id, tool="remove"))
+        await chat.send_photo(
+            preview,
+            "I'll remove what's in the highlighted area and fill it in to match its surroundings.",
+            [[("✅ Remove it", f"rmok:{token}"), ("❌ Cancel", f"fixno:{token}")]],
+        )
+
+    async def _ask_extend(self, source: Path, prompt: str, chat: Chat, user_id: int) -> None:
+        if not await self._has_inpainter("extend", chat):
+            return
+        token = self._put_fix(PendingFix(source, None, prompt, user_id, tool="extend"))
+        buttons = [(label, f"exd:{token}:{key}") for key, (_, label) in EXTEND_CHOICES.items()]
+        await chat.send_text(EXTEND_QUESTION, [buttons, [("❌ Cancel", f"fixno:{token}")]])
+
+    async def _extend_result(self, action: Action, chat: Chat, user_id: int) -> None:
+        gallery = await self.galleries.get()
+        path = gallery.path(action.image_name) if gallery is not None and action.image_name else None
+        if path is None or not path.is_file():
+            await chat.send_text("⚠️ That image isn't in the gallery any more.")
+            return
+        await self._ask_extend(path, "", chat, user_id)
+
     async def _continue_fix(self, kind: str, value: str, chat: Chat, user_id: int) -> None:
         token, _, region = value.partition(":")
         pending = self._fixes.get(token)
@@ -306,6 +390,9 @@ class StudioBot:
         del self._fixes[token]
         if kind == "fixno":
             await chat.send_text(FIX_CANCELLED)
+            return
+        if kind in ("rmok", "exd"):
+            await self._run_edit(kind, region, pending, chat, user_id)
             return
         mask = pending.mask
         if kind == "area":
@@ -322,6 +409,25 @@ class StudioBot:
                 source=pending.source, mask=mask, prompt=pending.prompt, negative_prompt=DEFAULT_NEGATIVE,
                 style=self.prefs_for(user_id).style_key, seed=None, available=await self.catalog.available(),
             )
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
+
+    async def _run_edit(self, kind: str, choice: str, pending: PendingFix, chat: Chat, user_id: int) -> None:
+        """Start a confirmed /remove (rmok) or the chosen /extend direction (exd)."""
+        available = await self.catalog.available()
+        try:
+            if kind == "rmok" and pending.mask is not None:
+                request: JobRequest = build_remove(source=pending.source, mask=pending.mask, available=available)
+            elif kind == "exd" and choice in EXTEND_CHOICES:
+                request = build_extend(
+                    source=pending.source, sides=EXTEND_CHOICES[choice][0], amount=DEFAULT_EXTEND_AMOUNT,
+                    prompt=pending.prompt, available=available,
+                )
+            else:
+                await chat.send_text(EXPIRED)
+                return
         except InvalidParamsError as exc:
             await chat.send_text(f"⚠️ {exc}")
             return
@@ -472,6 +578,10 @@ class StudioBot:
     def _again(action: Action, batch: int) -> JobRequest:
         """The same settings with a new seed: from the same start image (and painted area) if there was one."""
         params = replace(action.params, seed=None, batch=batch)
+        if action.source and action.tool == "extend" and action.layout:
+            return ExtendRequest(action.source, action.layout, replace(params, batch=1))
+        if action.source and action.tool == "remove" and action.mask:
+            return RemoveRequest(action.source, action.mask, replace(params, batch=1))
         if action.source and action.mask:
             return InpaintRequest(action.source, action.mask, replace(params, batch=1))
         return Img2ImgRequest(action.source, params, action.strength) if action.source else params
@@ -500,6 +610,21 @@ class StudioBot:
             return
         await self._run(request, chat, user_id)
 
+    async def _sharp(self, action: Action, chat: Chat, user_id: int) -> None:
+        gallery = await self.galleries.get()
+        try:
+            if gallery is None or action.image_name is None:
+                raise FileNotFoundError(action.image_name)
+            image = gallery.get(action.image_name)
+            request = build_sharp_upscale(gallery.path(action.image_name), image.params, await self.catalog.upscalers())
+        except (FileNotFoundError, ValueError):
+            await chat.send_text("⚠️ That image isn't in the gallery any more.")
+            return
+        except InvalidParamsError as exc:
+            await chat.send_text(f"⚠️ {exc}")
+            return
+        await self._run(request, chat, user_id)
+
     async def _run(self, request: JobRequest, chat: Chat, user_id: int) -> None:
         try:
             job = self.jobs.start(request)
@@ -508,6 +633,12 @@ class StudioBot:
             return
         if isinstance(request, UpscaleRequest):
             label = "🔍 Upscaling ×2"
+        elif isinstance(request, SharpUpscaleRequest):
+            label = "🔎 Upscaling ×4"
+        elif isinstance(request, ExtendRequest):
+            label = "↔️ Extending the picture"
+        elif isinstance(request, RemoveRequest):
+            label = "🧽 Removing the marked area"
         elif isinstance(request, Img2ImgRequest):
             label = f"🎨 {self._model_label(request.params)} · editing your photo"
         elif isinstance(request, InpaintRequest):
@@ -534,9 +665,14 @@ class StudioBot:
             await chat.edit_text(status, NOT_FOUND)
             return
         paths = [gallery.path(image["name"]) for image in images]
-        if isinstance(request, UpscaleRequest):
-            p = request.params
-            await chat.send_document(paths[0], f"🔍 Upscaled ×2 · {p.width * 2}×{p.height * 2} · {event['elapsed']}s")
+        if isinstance(request, UpscaleRequest | SharpUpscaleRequest):
+            p, scale = request.params, 2 if isinstance(request, UpscaleRequest) else 4
+            icon = "🔍" if scale == 2 else "🔎"
+            await chat.send_document(paths[0], f"{icon} Upscaled ×{scale} · {p.width * scale}×{p.height * scale} · {event['elapsed']}s")
+        elif isinstance(request, ExtendRequest | RemoveRequest):
+            what = "↔️ Extended" if isinstance(request, ExtendRequest) else "🧽 Removed"
+            caption = f"{what} · {images[0]['width']}×{images[0]['height']} · {event['elapsed']}s"
+            await chat.send_photo(paths[0], caption, self._photo_buttons(request, images[0]["name"], user_id))
         else:
             params = request.params if isinstance(request, Img2ImgRequest | InpaintRequest) else request
             caption = caption_for(params, event["seed"], event["elapsed"], self._model_label(params))
@@ -548,6 +684,10 @@ class StudioBot:
         await chat.delete(status)
 
     def _reuse(self, request: JobRequest, image_name: str | None, user_id: int) -> str:
+        if isinstance(request, ExtendRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, layout=request.layout, tool="extend")
+        if isinstance(request, RemoveRequest):
+            return self.actions.put(request.params, image_name, user_id, request.source, mask=request.mask, tool="remove")
         if isinstance(request, InpaintRequest):
             return self.actions.put(request.params, image_name, user_id, request.source, mask=request.mask)
         if isinstance(request, Img2ImgRequest):
@@ -555,16 +695,21 @@ class StudioBot:
         return self.actions.put(request, image_name, user_id)
 
     def _photo_buttons(self, request: JobRequest, image_name: str, user_id: int) -> Buttons:
-        params = request.params if isinstance(request, Img2ImgRequest | InpaintRequest) else request
+        edit = isinstance(request, InpaintRequest | ExtendRequest | RemoveRequest)
+        params = request.params if isinstance(request, Img2ImgRequest) or edit else request
         profile = profile_for_ckpt(params.model or "") or FALLBACK_LIMITS
         small = max(params.width, params.height) <= UPSCALE_MAX_SIDE
         reuse = self._reuse(request, None, user_id)
+        image = self.actions.put(params, image_name, user_id)
         row = [("🔁 Vary", f"vary:{reuse}")]
-        if profile.max_batch >= 4 and small and not isinstance(request, InpaintRequest):
+        if profile.max_batch >= 4 and small and not edit:
             row.append(("🖼️ ×4", f"x4:{reuse}"))
         if profile.upscale and small:
-            row.append(("🔍 Upscale", f"up:{self.actions.put(params, image_name, user_id)}"))
-        return [row]
+            row.append(("🔍 Upscale", f"up:{image}"))
+        more = [("↔️ Extend", f"ext:{image}")]
+        if max(params.width, params.height) <= SHARP_MAX_SIDE:
+            more.append(("🔎 Sharp ×4", f"sharp:{image}"))
+        return [row, more]
 
     def _picker_buttons(self, request: GenerationParams | Img2ImgRequest, images: list[dict[str, Any]], user_id: int) -> Buttons:
         upscale_row = [(f"🔍 {n}", f"up:{self._reuse(request, image['name'], user_id)}") for n, image in enumerate(images, 1)]

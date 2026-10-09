@@ -191,8 +191,12 @@ SD15 = "v1-5-pruned-emaonly.safetensors"
 
 
 class FakeCatalog:
-    def __init__(self, ckpts: list[str]) -> None:
+    def __init__(self, ckpts: list[str], upscalers: list[str] | None = None) -> None:
         self.ckpts = ckpts
+        self.upscaler_files = upscalers if upscalers is not None else ["RealESRGAN_x4plus.safetensors"]
+
+    async def upscalers(self):
+        return self.upscaler_files
 
     async def available(self):
         from models import available_profiles
@@ -200,12 +204,12 @@ class FakeCatalog:
         return available_profiles(self.ckpts)
 
 
-def recording_app(settings, seen: list, ckpts=(DREAM, SD15, SDXL)):
+def recording_app(settings, seen: list, ckpts=(DREAM, SD15, SDXL), upscalers=None):
     async def runner(request, on_progress, on_preview=None):
         seen.append(request)
         return {"image": None, "images": [], "seed": 1, "elapsed": 0.1}
 
-    return create_app(settings, runner=runner, catalog=FakeCatalog(list(ckpts)))
+    return create_app(settings, runner=runner, catalog=FakeCatalog(list(ckpts), upscalers))
 
 
 def test_models_endpoint(settings) -> None:
@@ -481,3 +485,92 @@ def test_upscale_from_draft(settings, make_png) -> None:
     assert (request.params.width, request.params.height, request.params.prompt) == (512, 384, "a red fox")
     assert refused.status_code == 422 and "already large" in refused.json()["error"]
     assert neither.status_code == 422
+
+
+# --- Phase 2: extend, remove object, sharp ×4 -------------------------------------------------------------
+
+
+def test_extend_starts_job(settings, make_png) -> None:
+    from web.jobs import ExtendRequest
+
+    make_png(settings.comfyui_output_dir / "pic.png", size=(768, 512))
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        response = client.post("/api/extend", json={"source_name": "pic.png", "sides": ["left", "right"]})
+        assert response.status_code == 200
+        sse_events(client, response.json()["job_id"])
+        draft = client.post("/api/extend", json={"source_id": _upload(client, _jpeg()), "sides": ["top"], "prompt": "blue sky"})
+        assert draft.status_code == 200
+        sse_events(client, draft.json()["job_id"])
+    wide, tall = seen
+    assert isinstance(wide, ExtendRequest) and wide.params.model == INPAINT
+    assert (wide.params.width, wide.params.height) == wide.layout.canvas == (1024, 448)
+    assert "scene continuing" in wide.params.prompt and "duplicate" in wide.params.negative_prompt
+    assert tall.params.prompt == "blue sky" and tall.layout.canvas[1] > tall.layout.box[3]
+
+
+def test_extend_errors(settings, make_png) -> None:
+    make_png(settings.comfyui_output_dir / "pic.png", size=(512, 512))
+    with TestClient(recording_app(settings, [], ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        no_sides = client.post("/api/extend", json={"source_name": "pic.png", "sides": []})
+        bad_side = client.post("/api/extend", json={"source_name": "pic.png", "sides": ["up"]})
+        too_much = client.post("/api/extend", json={"source_name": "pic.png", "sides": ["left"], "amount": 2})
+        no_image = client.post("/api/extend", json={"sides": ["left"]})
+    assert no_sides.status_code == bad_side.status_code == too_much.status_code == no_image.status_code == 422
+    assert "Choose which sides" in no_sides.json()["error"] and "amount" in too_much.json()["error"]
+    with TestClient(recording_app(settings, [], ckpts=(DREAM,)), base_url=BASE_URL) as client:
+        missing_model = client.post("/api/extend", json={"source_name": "pic.png", "sides": ["left"]})
+    assert missing_model.status_code == 422 and "Extend needs" in missing_model.json()["error"]
+
+
+def test_remove_starts_job(settings, make_png) -> None:
+    from web.jobs import RemoveRequest
+
+    make_png(settings.comfyui_output_dir / "pic.png", size=(800, 600))
+    seen: list = []
+    with TestClient(recording_app(settings, seen, ckpts=(DREAM, INPAINT)), base_url=BASE_URL) as client:
+        response = client.post("/api/remove", json={"source_name": "pic.png", "mask_id": _upload(client, _mask())})
+        assert response.status_code == 200
+        sse_events(client, response.json()["job_id"])
+        empty = client.post("/api/remove", json={"source_name": "pic.png", "mask_id": _upload(client, _mask(painted=False))})
+        bad_mask = client.post("/api/remove", json={"source_name": "pic.png", "mask_id": "nope"})
+    request = seen[0]
+    assert isinstance(request, RemoveRequest)
+    assert (request.params.model, request.params.width, request.params.height) == (INPAINT, 768, 576)
+    assert "empty background" in request.params.prompt
+    assert empty.status_code == 422 and "Paint over" in empty.json()["error"]
+    assert bad_mask.status_code == 400
+
+
+def test_sharp_upscale(settings, make_png) -> None:
+    from web.jobs import SharpUpscaleRequest
+
+    graph = graph_for(_Params(prompt="a fox", width=1024, height=1024, seed=4))
+    graph["4"]["inputs"]["ckpt_name"] = SDXL
+    make_png(settings.comfyui_output_dir / "xl.png", graph, size=(1024, 1024))
+    make_png(settings.comfyui_output_dir / "huge.png", size=(1280, 720))
+    seen: list = []
+    with TestClient(recording_app(settings, seen), base_url=BASE_URL) as client:
+        assert client.get("/api/models").json()["sharp"] is True
+        ok = client.post("/api/upscale", json={"name": "xl.png", "scale": 4})  # ×2 refuses SDXL; ×4 is light
+        assert ok.status_code == 200
+        sse_events(client, ok.json()["job_id"])
+        too_big = client.post("/api/upscale", json={"name": "huge.png", "scale": 4})
+        bad_scale = client.post("/api/upscale", json={"name": "xl.png", "scale": 3})
+    request = seen[0]
+    assert isinstance(request, SharpUpscaleRequest) and request.model_name == "RealESRGAN_x4plus.safetensors"
+    assert (request.params.width, request.params.height, request.params.prompt) == (1024, 1024, "a fox")
+    assert too_big.status_code == 422 and "4000" in too_big.json()["error"]
+    assert bad_scale.status_code == 422
+    with TestClient(recording_app(settings, [], upscalers=[]), base_url=BASE_URL) as client:
+        assert client.get("/api/models").json()["sharp"] is False
+        missing = client.post("/api/upscale", json={"name": "xl.png", "scale": 4})
+    assert missing.status_code == 422 and "isn't installed" in missing.json()["error"]
+
+
+def test_new_kinds_in_gallery() -> None:
+    from web.gallery import image_kind
+
+    assert image_kind("ComfyUI_outpaint_00001_.png") == "edited"
+    assert image_kind("ComfyUI_remove_00001_.png") == "fixed"
+    assert image_kind("ComfyUI_upscaled_x4_00001_.png") == "upscaled"

@@ -1,4 +1,4 @@
-// LUMOS Edit studio: one image, a history of versions, AI tools (Fix, Restyle, Upscale) and instant
+// LUMOS Edit studio: one image, a history of versions, AI tools (Fix, Remove, Extend, Restyle, Upscale) and instant
 // browser tools (crop, rotate, flip, adjust, filters). AI results land in the Gallery automatically;
 // browser edits are drafts until Save.
 
@@ -13,13 +13,18 @@ const FILTERS = {
   fade: { label: "Fade", contrast: 0.8, brightness: 1.08, saturation: 0.82 },
 };
 const TOOL_TITLES = {
-  fix: "Fix part", restyle: "Restyle", upscale: "Upscale ×2", crop: "Crop & rotate", adjust: "Adjust", filters: "Filters",
+  fix: "Fix part", remove: "Remove object", extend: "Extend", restyle: "Restyle", upscale: "Upscale",
+  crop: "Crop & rotate", adjust: "Adjust", filters: "Filters",
 };
+const BRUSH_TOOLS = new Set(["fix", "remove"]);
 const UPSCALE_MAX_SIDE = 768;
+const SHARP_MAX_SIDE = 1024; // ×4 → 4096 px
+const EXTEND_MAX_SIDE = 1024; // the canvas the AI paints on
+const EXTEND_FULL_MAX_SIDE = 2048; // the finished picture: the original keeps its resolution up to this size
 const MASK_COLOR = "rgb(242, 181, 68)";
 
 export function initEdit(deps) {
-  const { api, toast, imageUrl, runJob, fitSize, getModelKey, getStyles, showTab, onNewImages, isBusy } = deps;
+  const { api, toast, imageUrl, runJob, fitSize, getModelKey, getStyles, showTab, onNewImages, isBusy, hasSharp } = deps;
   const $ = (selector) => document.querySelector(selector);
   const el = {
     view: $("#edit-view"), empty: $("#edit-empty"), workspace: $("#edit-workspace"), pick: $("#edit-pick"), file: $("#edit-file"),
@@ -31,6 +36,11 @@ export function initEdit(deps) {
     // tool panels
     fixPrompt: $("#edit-fix-prompt"), brush: $("#edit-brush"), brushValue: $("#edit-brush-value"),
     paint: $("#edit-paint"), erase: $("#edit-erase"), clearMask: $("#edit-clear-mask"), fixGo: $("#edit-fix-go"),
+    brushTools: $("#edit-brush-tools"), removeGo: $("#edit-remove-go"),
+    extendFrame: $("#edit-extend"), sides: [...document.querySelectorAll("#edit-view [data-side]")],
+    amounts: [...document.querySelectorAll("#edit-view [data-amount]")], extendPrompt: $("#edit-extend-prompt"),
+    extendInfo: $("#edit-extend-info"), extendGo: $("#edit-extend-go"),
+    scales: [...document.querySelectorAll("#edit-view [data-scale]")],
     restylePrompt: $("#edit-restyle-prompt"), restyleStrength: $("#edit-restyle-strength"), restyleStrengthValue: $("#edit-restyle-strength-value"),
     restyleStyle: $("#edit-restyle-style"), restyleGo: $("#edit-restyle-go"),
     upscaleInfo: $("#edit-upscale-info"), upscaleGo: $("#edit-upscale-go"),
@@ -40,7 +50,10 @@ export function initEdit(deps) {
     filterGrid: $("#edit-filter-grid"), filterApply: $("#edit-filter-apply"),
   };
 
-  const session = { versions: [], current: -1, tool: "restyle", adjust: { ...NEUTRAL }, filter: null, crop: null, aspect: null };
+  const session = {
+    versions: [], current: -1, tool: "restyle", adjust: { ...NEUTRAL }, filter: null, crop: null, aspect: null,
+    sides: new Set(["left", "right"]), amount: 0.25, scale: 2,
+  };
   const view = { scale: 1, x: 0, y: 0, panning: null };
   const brush = { erasing: false, drawing: false, last: null };
 
@@ -99,6 +112,7 @@ export function initEdit(deps) {
       }
       fitView();
       resetCrop();
+      renderPanels();
     };
     el.img.src = version.url;
     el.before.src = session.versions[0].url;
@@ -132,24 +146,83 @@ export function initEdit(deps) {
     const draft = Boolean(version.sourceId && !version.saved);
     el.save.disabled = !draft || isBusy();
     el.save.title = draft ? "Save this version to the Gallery" : "This version is already in the Gallery";
-    const tooBig = Math.max(version.width, version.height) > UPSCALE_MAX_SIDE;
-    el.upscaleGo.disabled = tooBig || isBusy();
-    el.upscaleInfo.textContent = tooBig
-      ? `This image is ${version.width}×${version.height}: already large, so upscaling it would overload your GPU.`
-      : `${version.width}×${version.height} → ${version.width * 2}×${version.height * 2}, with real added detail.`;
-    for (const button of [el.fixGo, el.restyleGo]) button.disabled = isBusy();
+    renderUpscale(version);
+    renderExtend(version);
+    for (const button of [el.fixGo, el.restyleGo, el.removeGo]) button.disabled = isBusy();
+  }
+
+  function renderUpscale(version) {
+    const { width, height } = version;
+    const sharp = session.scale === 4;
+    let problem = null;
+    if (sharp && !hasSharp()) problem = "The sharp ×4 upscaler isn't installed in ComfyUI.";
+    else if (Math.max(width, height) > (sharp ? SHARP_MAX_SIDE : UPSCALE_MAX_SIDE)) {
+      problem = sharp
+        ? `This image is ${width}×${height}: ×4 would make it over 4000 px.`
+        : `This image is ${width}×${height}: already large, so ×2 Detail would overload your GPU.${hasSharp() && Math.max(width, height) <= SHARP_MAX_SIDE ? " Try ×4 Sharp." : ""}`;
+    }
+    const scale = session.scale;
+    el.upscaleGo.disabled = Boolean(problem) || isBusy();
+    el.upscaleGo.querySelector(".generate-label").textContent = `Upscale ×${scale}`;
+    el.upscaleInfo.textContent = problem ?? (sharp
+      ? `${width}×${height} → ${width * 4}×${height * 4}. Crisp and faithful: nothing new is invented. Fast.`
+      : `${width}×${height} → ${width * 2}×${height * 2}, with real added detail painted in by the AI.`);
+  }
+
+  // same maths as the server (ai_edits.extend_layout / full_size_layout): grow the chosen sides; the AI paints
+  // on a canvas of at most 1024 px, and the result keeps the original's resolution up to 2048 px
+  function extendLayout(width, height) {
+    const grow = (side) => (session.sides.has(side) ? session.amount * (side === "left" || side === "right" ? width : height) : 0);
+    const pad = { left: grow("left"), top: grow("top"), right: grow("right"), bottom: grow("bottom") };
+    const newWidth = width + pad.left + pad.right;
+    const newHeight = height + pad.top + pad.bottom;
+    const long = Math.max(newWidth, newHeight);
+    const scale = Math.min(Math.max(long, 512), EXTEND_MAX_SIDE) / long;
+    const work = [Math.floor(Math.round(newWidth * scale) / 8) * 8, Math.floor(Math.round(newHeight * scale) / 8) * 8];
+    const fit = Math.min(1, EXTEND_FULL_MAX_SIDE / long);
+    const full = [Math.round(newWidth * fit), Math.round(newHeight * fit)];
+    return { pad, canvas: full[0] * full[1] > work[0] * work[1] ? full : work };
+  }
+
+  function renderExtend(version) {
+    const none = session.sides.size === 0;
+    el.extendGo.disabled = none || isBusy();
+    if (none) {
+      el.extendInfo.textContent = "Pick at least one side.";
+    } else {
+      const [width, height] = extendLayout(version.width, version.height).canvas;
+      el.extendInfo.textContent = `${version.width}×${version.height} → ${width}×${height}.`;
+    }
+    drawExtendFrame();
+  }
+
+  // the dashed canvas around the picture, in image pixels, moved and zoomed together with the frame
+  function drawExtendFrame() {
+    const width = el.img.naturalWidth;
+    const height = el.img.naturalHeight;
+    el.extendFrame.hidden = session.tool !== "extend" || !width || session.sides.size === 0;
+    if (el.extendFrame.hidden) return;
+    const { pad } = extendLayout(width, height);
+    el.extendFrame.style.width = `${width + pad.left + pad.right}px`;
+    el.extendFrame.style.height = `${height + pad.top + pad.bottom}px`;
+    el.extendFrame.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale}) translate(${-pad.left}px, ${-pad.top}px)`;
+    el.extendFrame.style.setProperty("--scale", String(view.scale));
   }
 
   function selectTool(tool) {
     if (session.tool === "adjust" || session.tool === "filters") resetPreview();
+    const refit = (session.tool === "extend") !== (tool === "extend"); // Extend's view includes the new area
     session.tool = tool;
     for (const button of el.tools) button.setAttribute("aria-pressed", String(button.dataset.tool === tool));
     for (const panel of el.panels) panel.hidden = panel.dataset.panel !== tool;
     el.title.textContent = TOOL_TITLES[tool];
-    el.mask.hidden = tool !== "fix";
+    el.view.dataset.toolActive = tool;
+    el.mask.hidden = !BRUSH_TOOLS.has(tool);
+    if (BRUSH_TOOLS.has(tool)) el.panels.find((panel) => panel.dataset.panel === tool).querySelector("[data-brush-slot]").append(el.brushTools);
     el.crop.hidden = tool !== "crop";
     if (tool === "crop") resetCrop();
     renderPanels();
+    if (refit && el.img.naturalWidth && !el.workspace.hidden) fitView();
   }
 
   // --- view: fit, 100%, wheel zoom, drag to pan ------------------------------------------------
@@ -158,15 +231,20 @@ export function initEdit(deps) {
     el.frame.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
     el.frame.style.setProperty("--scale", String(view.scale)); // keeps outlines crisp at any zoom
     el.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+    drawExtendFrame();
   }
 
   function fitView() {
     const box = el.canvas.getBoundingClientRect();
     const width = el.img.naturalWidth || 1;
     const height = el.img.naturalHeight || 1;
-    view.scale = Math.min((box.width - 48) / width, (box.height - 48) / height, 4);
-    view.x = (box.width - width * view.scale) / 2;
-    view.y = (box.height - height * view.scale) / 2;
+    // with Extend open, fit the bigger canvas so the new area is visible too
+    const pad = session.tool === "extend" && session.sides.size ? extendLayout(width, height).pad : { left: 0, top: 0, right: 0, bottom: 0 };
+    const outerWidth = width + pad.left + pad.right;
+    const outerHeight = height + pad.top + pad.bottom;
+    view.scale = Math.min((box.width - 48) / outerWidth, (box.height - 48) / outerHeight, 4);
+    view.x = (box.width - outerWidth * view.scale) / 2 + pad.left * view.scale;
+    view.y = (box.height - outerHeight * view.scale) / 2 + pad.top * view.scale;
     applyView();
   }
 
@@ -329,10 +407,17 @@ export function initEdit(deps) {
 
   // --- AI tools: they run as jobs and land in the Gallery ------------------------------------------
 
+  // the size the result will have, so the live preview has the right shape
+  function resultSize(path, version) {
+    if (path === "/api/upscale") return [version.width * session.scale, version.height * session.scale];
+    if (path === "/api/extend") return extendLayout(version.width, version.height).canvas;
+    if (path === "/api/inpaint" || path === "/api/remove") return [version.width, version.height]; // pasted back at full size
+    return fitSize(version.width, version.height, deps.liveMaxSide());
+  }
+
   async function runAiTool(path, body, label) {
     const version = current();
-    const max = deps.liveMaxSide(path === "/api/upscale");
-    const [width, height] = path === "/api/upscale" ? [version.width * 2, version.height * 2] : fitSize(version.width, version.height, max);
+    const [width, height] = resultSize(path, version);
     await runJob(path, body, width, height, {
       liveHost: el.liveHost,
       onDone: (event) => {
@@ -370,18 +455,38 @@ export function initEdit(deps) {
     return new Promise((resolve) => out.toBlob(resolve, "image/png"));
   }
 
+  async function uploadMask() {
+    try {
+      return (await api("/api/sources", { method: "POST", headers: { "Content-Type": "image/png" }, body: await maskBlob() })).id;
+    } catch (error) {
+      toast(error.message, "error");
+      return null;
+    }
+  }
+
   async function fixNow() {
     const prompt = el.fixPrompt.value.trim();
     if (!prompt) return toast("Describe what the picture should show.", "error");
     if (!hasMask()) return toast("Paint over the area you want to change first.", "error");
-    let maskId;
-    try {
-      maskId = (await api("/api/sources", { method: "POST", headers: { "Content-Type": "image/png" }, body: await maskBlob() })).id;
-    } catch (error) {
-      return toast(error.message, "error");
-    }
+    const maskId = await uploadMask();
+    if (!maskId) return;
     await runAiTool("/api/inpaint", { prompt, mask_id: maskId, style: el.restyleStyle.value, ...sourceFields(current()) }, "Fixed");
     el.mask.getContext("2d").clearRect(0, 0, el.mask.width, el.mask.height);
+  }
+
+  async function removeNow() {
+    if (!hasMask()) return toast("Paint over what you want to remove first.", "error");
+    const maskId = await uploadMask();
+    if (!maskId) return;
+    await runAiTool("/api/remove", { mask_id: maskId, ...sourceFields(current()) }, "Removed");
+    el.mask.getContext("2d").clearRect(0, 0, el.mask.width, el.mask.height);
+  }
+
+  function extendNow() {
+    if (!session.sides.size) return toast("Pick at least one side to extend.", "error");
+    return runAiTool("/api/extend", {
+      sides: [...session.sides], amount: session.amount, prompt: el.extendPrompt.value.trim(), ...sourceFields(current()),
+    }, "Extended");
   }
 
   function restyleNow() {
@@ -396,7 +501,7 @@ export function initEdit(deps) {
   function upscaleNow() {
     const version = current();
     const body = version.name ? { name: version.name } : { source_id: version.sourceId, parent_name: version.parentName };
-    return runAiTool("/api/upscale", body, "Upscaled ×2");
+    return runAiTool("/api/upscale", { ...body, scale: session.scale }, `Upscaled ×${session.scale}`);
   }
 
   async function saveNow() {
@@ -501,7 +606,7 @@ export function initEdit(deps) {
     if (event.button !== 0 || !current()) return;
     if (event.target.closest(".edit-view-controls")) return; // let its buttons get their clicks (no capture)
     el.canvas.setPointerCapture(event.pointerId);
-    if (session.tool === "fix") {
+    if (BRUSH_TOOLS.has(session.tool)) {
       brush.drawing = true;
       brush.last = null;
       strokeTo(imagePoint(event));
@@ -553,6 +658,33 @@ export function initEdit(deps) {
   });
   el.restyleGo.addEventListener("click", restyleNow);
   el.upscaleGo.addEventListener("click", upscaleNow);
+  el.removeGo.addEventListener("click", removeNow);
+  el.extendGo.addEventListener("click", extendNow);
+  for (const chip of el.scales) {
+    chip.addEventListener("click", () => {
+      session.scale = Number(chip.dataset.scale);
+      for (const other of el.scales) other.setAttribute("aria-checked", String(other === chip));
+      renderPanels();
+    });
+  }
+  for (const button of el.sides) {
+    button.addEventListener("click", () => {
+      const side = button.dataset.side;
+      if (session.sides.has(side)) session.sides.delete(side);
+      else session.sides.add(side);
+      button.setAttribute("aria-checked", String(session.sides.has(side)));
+      renderPanels();
+      fitView();
+    });
+  }
+  for (const chip of el.amounts) {
+    chip.addEventListener("click", () => {
+      session.amount = Number(chip.dataset.amount);
+      for (const other of el.amounts) other.setAttribute("aria-checked", String(other === chip));
+      renderPanels();
+      fitView();
+    });
+  }
   for (const chip of el.aspects) {
     chip.addEventListener("click", () => {
       session.aspect = ASPECTS[chip.dataset.aspect];

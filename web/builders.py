@@ -1,4 +1,4 @@
-"""Turn user choices (model, style, size, ×4, upscale) into GPU-safe job requests. Shared by Studio and the bot."""
+"""Turn user choices (model, style, size, ×4, upscale, extend, remove) into GPU-safe job requests. Shared by Studio and the bot."""
 
 from __future__ import annotations
 
@@ -6,14 +6,26 @@ from pathlib import Path
 
 from PIL import Image
 
+from ai_edits import EXTEND_NEGATIVE, EXTEND_PROMPT, REMOVE_NEGATIVE, REMOVE_PROMPT, extend_layout, remove_images
 from comfy_client import DEFAULT_NEGATIVE, GenerationParams, InvalidParamsError, fit_size, inpaint_masks
 from models import INPAINT_KEY, ModelProfile, check_limits, default_profile, profile_by_key, profile_for_ckpt
 from styles import apply_style
 from web.gallery import GalleryImage
-from web.jobs import Img2ImgRequest, InpaintRequest, UpscaleRequest
+from web.jobs import (
+    ExtendRequest,
+    Img2ImgRequest,
+    InpaintRequest,
+    RemoveRequest,
+    SharpUpscaleRequest,
+    UpscaleRequest,
+)
 
 UPSCALE_MAX_SIDE = 768  # ×2 of this is the largest image the 6 GB GPU refines comfortably
 IMG2IMG_MAX_SIDE = {"sd15": 768, "sdxl": 1024}  # start images are resized to fit these
+EXTEND_MAX_SIDE = 1024  # the whole new canvas; SD 1.5 inpainting stays well within 6 GB at this size
+SHARP_MAX_SIDE = 1024  # ×4 → 4096 px, the largest picture worth handling here
+SHARP_MODEL = "RealESRGAN_x4plus.safetensors"
+DEFAULT_EXTEND_AMOUNT = 0.25
 DEFAULT_STRENGTH = 0.55
 FALLBACK_UPSCALE_PROMPT = "high quality, detailed"
 FALLBACK_LIMITS = profile_by_key("sd15")
@@ -96,9 +108,7 @@ def build_inpaint(
     available: list[ModelProfile],
 ) -> InpaintRequest:
     """Plan an inpainting job: only the painted area changes, using the dedicated inpainting model."""
-    profile = profile_by_key(INPAINT_KEY)
-    if profile not in available:
-        raise InvalidParamsError(f"Inpainting needs the {profile.label} model, which isn't installed in ComfyUI.")
+    profile = _inpainter(available, "Inpainting")
     if not prompt.strip():
         raise InvalidParamsError("Invalid parameters: prompt must not be empty.")
     try:
@@ -147,3 +157,56 @@ def _upscale_fallback(available: list[ModelProfile]) -> ModelProfile:
     if profile is None:
         raise InvalidParamsError("No SD 1.5 model is installed in ComfyUI for upscaling.")
     return profile
+
+
+def build_extend(
+    *, source: Path, sides: set[str], amount: float, prompt: str, available: list[ModelProfile],
+) -> ExtendRequest:
+    """Plan an Extend: the picture is kept and new surroundings are painted on the chosen sides."""
+    profile = _inpainter(available, "Extend")
+    layout = extend_layout(_image_size(source), sides, amount, EXTEND_MAX_SIDE)
+    params = GenerationParams(
+        prompt.strip() or EXTEND_PROMPT, EXTEND_NEGATIVE, *layout.canvas, profile.steps, profile.cfg, model=profile.ckpt,
+    )
+    params.validate()
+    return ExtendRequest(source=source, layout=layout, params=params)
+
+
+def build_remove(*, source: Path, mask: Path, available: list[ModelProfile]) -> RemoveRequest:
+    """Plan a Remove object: only the painted area changes, filled in to match its surroundings."""
+    profile = _inpainter(available, "Remove object")
+    width, height = fit_size(*_image_size(source), IMG2IMG_MAX_SIDE["sd15"])
+    remove_images(source, mask, (width, height))  # raises if nothing was painted
+    params = GenerationParams(REMOVE_PROMPT, REMOVE_NEGATIVE, width, height, profile.steps, profile.cfg, model=profile.ckpt)
+    params.validate()
+    return RemoveRequest(source=source, mask=mask, params=params)
+
+
+def build_sharp_upscale(source: Path, parent_params: dict | None, upscalers: list[str]) -> SharpUpscaleRequest:
+    """Plan a sharp ×4 upscale with the dedicated upscaling model (no diffusion, so any model's images work)."""
+    if SHARP_MODEL not in upscalers:
+        raise InvalidParamsError("The sharp ×4 upscaler (RealESRGAN x4plus) isn't installed in ComfyUI.")
+    width, height = _image_size(source)
+    if max(width, height) > SHARP_MAX_SIDE:
+        raise InvalidParamsError(f"This image is already large ({width}×{height}); ×4 would make it over 4000 px.")
+    parent = parent_params or {}
+    params = GenerationParams(
+        parent.get("prompt") or FALLBACK_UPSCALE_PROMPT, parent.get("negative_prompt") or DEFAULT_NEGATIVE,
+        width, height, seed=parent.get("seed"), model=parent.get("model"),
+    )
+    return SharpUpscaleRequest(source=source, model_name=SHARP_MODEL, params=params)
+
+
+def _inpainter(available: list[ModelProfile], tool: str) -> ModelProfile:
+    profile = profile_by_key(INPAINT_KEY)
+    if profile not in available:
+        raise InvalidParamsError(f"{tool} needs the {profile.label} model, which isn't installed in ComfyUI.")
+    return profile
+
+
+def _image_size(source: Path) -> tuple[int, int]:
+    try:
+        with Image.open(source) as img:
+            return img.size
+    except OSError as exc:
+        raise InvalidParamsError("The image can't be read.") from exc

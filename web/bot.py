@@ -24,6 +24,8 @@ COMMANDS = [
     BotCommand("model", "Choose the model"),
     BotCommand("style", "Choose a style"),
     BotCommand("fix", "Photo caption: /fix <what should be there> (draw with the pink pen first)"),
+    BotCommand("remove", "Photo caption: /remove (draw over it with the pink pen first)"),
+    BotCommand("extend", "Photo caption: /extend [what the new area shows]"),
     BotCommand("help", "How to use this bot"),
 ]
 

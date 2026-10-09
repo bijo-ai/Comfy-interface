@@ -246,6 +246,11 @@ class ComfyClient:
             return list(spec[1].get("options", []))
         return list(spec[0])
 
+    async def list_upscale_models(self) -> list[str]:
+        response = await self._request("GET", "/models/upscale_models")
+        response.raise_for_status()
+        return [name for name in response.json() if isinstance(name, str)]
+
     async def upload_image(self, path: Path, name: str) -> str:
         return await self.upload_bytes(path.read_bytes(), name)
 
@@ -535,7 +540,10 @@ async def inpaint(
     on_progress: ProgressCallback | None = None,
     on_preview: PreviewCallback | None = None,
 ) -> GenerationResult:
-    """Regenerate only the painted (white) area of `mask`; everything else keeps the original pixels."""
+    """Regenerate only the painted (white) area of `mask`; everything else keeps the original pixels.
+
+    The model works at params.width × params.height; the result is pasted back onto the full-size original.
+    """
     if not params.model:
         raise InvalidParamsError("Inpainting needs a model.")
     params.validate()
@@ -546,8 +554,41 @@ async def inpaint(
         image_name = await client.upload_bytes(_resized_png(source, params.width, params.height), INPAINT_INPUT_NAME)
         hard_name = await client.upload_bytes(hard_mask, INPAINT_MASK_NAME)
         soft_name = await client.upload_bytes(soft_mask, INPAINT_SOFT_MASK_NAME)
-    workflow = build_inpaint_workflow(params.model, image_name, hard_name, soft_name, params)
-    return await _run(workflow, INPAINT_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
+        workflow = build_inpaint_workflow(params.model, image_name, hard_name, soft_name, params)
+        full_size = await paste_at_full_size(client, workflow, source, mask, (params.width, params.height))
+    result = await _run(workflow, INPAINT_SAVE_NODE, params, settings, on_progress, on_preview, save_copy=False)
+    result.params = replace(params, width=full_size[0], height=full_size[1])
+    return result
+
+
+FULL_SIZE_NODES = ("12", "13", "14")
+
+
+async def paste_at_full_size(
+    client: ComfyClient, workflow: Workflow, source: Path, mask: Path, work_size: tuple[int, int],
+) -> tuple[int, int]:
+    """Make a fill/inpaint graph paste its repainted area onto the untouched full-size original.
+
+    The model works at a GPU-safe size; only the masked area is scaled back up, so the picture keeps its
+    resolution. Returns the result's size (unchanged graph when the original is already the work size).
+    """
+    with Image.open(source) as img:
+        size = img.size
+    if size == work_size:
+        return size
+    _, soft_mask = inpaint_masks(mask, *size)
+    original = await client.upload_image(source, "studio_full_src.png")
+    soft = await client.upload_bytes(soft_mask, "studio_full_mask_soft.png")
+    repainted = workflow["11"]["inputs"]["source"]
+    load, mask_node, scale = FULL_SIZE_NODES
+    workflow[load] = {"class_type": "LoadImage", "inputs": {"image": original}}
+    workflow[mask_node] = {"class_type": "LoadImageMask", "inputs": {"image": soft, "channel": "red"}}
+    workflow[scale] = {
+        "class_type": "ImageScale",
+        "inputs": {"image": repainted, "upscale_method": "lanczos", "width": size[0], "height": size[1], "crop": "disabled"},
+    }
+    workflow["11"]["inputs"].update(destination=[load, 0], source=[scale, 0], mask=[mask_node, 0])
+    return size
 
 
 INPAINT_INPUT_NAME = "studio_inpaint_src.png"

@@ -438,7 +438,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .edit-main { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 14px; min-width: 0; min-height: 0; }
 .edit-canvas { overflow: hidden; touch-action: none; cursor: grab; border-radius: var(--radius); }
 .edit-canvas:active { cursor: grabbing; }
-.edit-view [data-tool-active="fix"] .edit-canvas, .edit-canvas.painting { cursor: crosshair; }
+.edit-view[data-tool-active="fix"] .edit-canvas, .edit-view[data-tool-active="remove"] .edit-canvas,
+.edit-view[data-tool-active="crop"] .edit-canvas { cursor: crosshair; }
 .edit-frame {
   position: absolute; left: 0; top: 0; transform-origin: 0 0; overflow: hidden; border-radius: 4px;
   box-shadow: 0 30px 80px -30px rgba(0, 0, 0, .95), 0 0 0 calc(1px / var(--scale, 1)) rgba(255, 255, 255, .08);
@@ -456,6 +457,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     linear-gradient(to right, transparent calc(33.33% - .5px), rgba(255, 255, 255, .35) 33.33%, transparent calc(33.33% + .5px), transparent calc(66.66% - .5px), rgba(255, 255, 255, .35) 66.66%, transparent calc(66.66% + .5px)),
     linear-gradient(to bottom, transparent calc(33.33% - .5px), rgba(255, 255, 255, .35) 33.33%, transparent calc(33.33% + .5px), transparent calc(66.66% - .5px), rgba(255, 255, 255, .35) 66.66%, transparent calc(66.66% + .5px));
 }
+/* Extend: the new canvas around the picture, drawn in image pixels with the same transform as the frame */
+.edit-extend {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; border-radius: 4px;
+  outline: calc(2px / var(--scale, 1)) dashed var(--accent); outline-offset: 0;
+  background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--accent) 14%, transparent) 0 calc(10px / var(--scale, 1)), transparent 0 calc(20px / var(--scale, 1)));
+}
+.extend-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.extend-sides [data-side="top"], .extend-sides [data-side="bottom"] { grid-column: 1 / -1; }
+.faint { color: var(--faint); }
+.edit-brush-tools { display: flex; flex-direction: column; gap: 10px; }
+.edit-upscale-kinds .chip { flex: 1 1 0; }
 .edit-live-host { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 2; }
 .edit-live-host .live { width: min(78%, calc(62vh * var(--aspect, 1))); }
 .edit-view-controls {

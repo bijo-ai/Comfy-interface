@@ -116,6 +116,8 @@
     <div id="edit-workspace" class="edit-workspace" hidden>
       <nav class="edit-tools panel" aria-label="Edit tools">
         <button type="button" class="tool" data-tool="fix" aria-pressed="false"><span aria-hidden="true">🖌️</span>Fix</button>
+        <button type="button" class="tool" data-tool="remove" aria-pressed="false"><span aria-hidden="true">🧽</span>Remove</button>
+        <button type="button" class="tool" data-tool="extend" aria-pressed="false"><span aria-hidden="true">↔️</span>Extend</button>
         <button type="button" class="tool" data-tool="restyle" aria-pressed="true"><span aria-hidden="true">🎨</span>Restyle</button>
         <button type="button" class="tool" data-tool="upscale" aria-pressed="false"><span aria-hidden="true">🔍</span>Upscale</button>
         <span class="tool-divider" aria-hidden="true"></span>
@@ -133,6 +135,7 @@
             <canvas id="edit-mask" class="edit-mask" hidden></canvas>
             <div id="edit-crop" class="edit-crop" hidden></div>
           </div>
+          <div id="edit-extend" class="edit-extend" hidden></div>
           <div id="edit-live-host" class="edit-live-host"></div>
           <div class="edit-view-controls glass">
             <button id="edit-compare" class="ghost small" type="button" aria-pressed="false">◐ Compare</button>
@@ -154,15 +157,46 @@
 
         <div data-panel="fix" hidden>
           <p class="muted">Paint over what should change. Everything you don't paint stays exactly the same.</p>
-          <div class="painter-modes" role="radiogroup" aria-label="Brush mode">
-            <button id="edit-paint" class="shape" type="button" role="radio" aria-checked="true">🖌️ Paint</button>
-            <button id="edit-erase" class="shape" type="button" role="radio" aria-checked="false">🧽 Erase</button>
-            <button id="edit-clear-mask" class="ghost" type="button">Clear</button>
+          <div data-brush-slot>
+            <div id="edit-brush-tools" class="edit-brush-tools">
+              <div class="painter-modes" role="radiogroup" aria-label="Brush mode">
+                <button id="edit-paint" class="shape" type="button" role="radio" aria-checked="true">🖌️ Paint</button>
+                <button id="edit-erase" class="shape" type="button" role="radio" aria-checked="false">🩹 Erase</button>
+                <button id="edit-clear-mask" class="ghost" type="button">Clear</button>
+              </div>
+              <label class="strength">Brush size <input id="edit-brush" type="range" min="8" max="140" step="2" value="44"><span id="edit-brush-value">44</span></label>
+            </div>
           </div>
-          <label class="strength">Brush size <input id="edit-brush" type="range" min="8" max="140" step="2" value="44"><span id="edit-brush-value">44</span></label>
           <label class="label" for="edit-fix-prompt">What should the picture show?</label>
           <textarea id="edit-fix-prompt" rows="3" placeholder="a man wearing a red beanie hat"></textarea>
           <button id="edit-fix-go" class="generate" type="button"><span class="generate-label">Fix it</span></button>
+        </div>
+
+        <div data-panel="remove" hidden>
+          <p class="muted">Paint over what should disappear: a person, a sign, a stray object. Cover its shadow too. The area is filled in to match what's around it.</p>
+          <div data-brush-slot></div>
+          <button id="edit-remove-go" class="generate" type="button"><span class="generate-label">Remove it</span></button>
+        </div>
+
+        <div data-panel="extend" hidden>
+          <p class="muted">Grow the picture past its edges. The new area continues the scene; the picture itself stays as it is.</p>
+          <span class="label">Sides</span>
+          <div class="extend-sides" role="group" aria-label="Sides to extend">
+            <button type="button" class="shape" role="checkbox" data-side="top" aria-checked="false">⬆ Top</button>
+            <button type="button" class="shape" role="checkbox" data-side="left" aria-checked="true">⬅ Left</button>
+            <button type="button" class="shape" role="checkbox" data-side="right" aria-checked="true">Right ➡</button>
+            <button type="button" class="shape" role="checkbox" data-side="bottom" aria-checked="false">⬇ Bottom</button>
+          </div>
+          <span class="label">How much</span>
+          <div class="chips" role="radiogroup" aria-label="How much to extend">
+            <button type="button" class="chip" role="radio" data-amount="0.15" aria-checked="false">A little</button>
+            <button type="button" class="chip" role="radio" data-amount="0.25" aria-checked="true">Some</button>
+            <button type="button" class="chip" role="radio" data-amount="0.4" aria-checked="false">A lot</button>
+          </div>
+          <label class="label" for="edit-extend-prompt">What's in the new area? <span class="faint">(optional)</span></label>
+          <textarea id="edit-extend-prompt" rows="2" placeholder="more of the same scene"></textarea>
+          <p id="edit-extend-info" class="muted"></p>
+          <button id="edit-extend-go" class="generate" type="button"><span class="generate-label">Extend</span></button>
         </div>
 
         <div data-panel="restyle">
@@ -176,6 +210,10 @@
         </div>
 
         <div data-panel="upscale" hidden>
+          <div class="chips edit-upscale-kinds" role="radiogroup" aria-label="Upscale type">
+            <button type="button" class="chip" role="radio" data-scale="2" aria-checked="true">×2 Detail</button>
+            <button type="button" class="chip" role="radio" data-scale="4" aria-checked="false">×4 Sharp</button>
+          </div>
           <p id="edit-upscale-info" class="muted"></p>
           <button id="edit-upscale-go" class="generate" type="button"><span class="generate-label">Upscale ×2</span></button>
         </div>
@@ -216,7 +254,7 @@
           <button id="edit-filter-apply" class="generate" type="button">Apply filter</button>
         </div>
 
-        <p class="muted note edit-note">AI steps (Fix, Restyle, Upscale) are saved to the Gallery automatically. Crops, adjustments and filters are drafts (•) until you press 💾 Save.</p>
+        <p class="muted note edit-note">AI steps (Fix, Remove, Extend, Restyle, Upscale) are saved to the Gallery automatically. Crops, adjustments and filters are drafts (•) until you press 💾 Save.</p>
       </aside>
     </div>
   </section>

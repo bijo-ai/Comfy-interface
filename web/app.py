@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, Request
@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
+from ai_edits import extend, remove_object, sharp_upscale
 from comfy_client import (
     DEFAULT_NEGATIVE,
     GenerationParams,
@@ -36,16 +37,32 @@ from styles import STYLES
 from web.bot import BotRunner, build_application, register_commands
 from web.bot_core import StudioBot
 from web.builders import (
+    DEFAULT_EXTEND_AMOUNT,
     DEFAULT_STRENGTH,
+    SHARP_MODEL,
+    build_extend,
     build_generation,
     build_img2img,
     build_inpaint,
+    build_remove,
+    build_sharp_upscale,
     build_upscale,
     resolve_profile,
 )
 from web.catalog import ModelCatalog
 from web.gallery import KINDS, Gallery, GalleryImage
-from web.jobs import BusyError, Img2ImgRequest, InpaintRequest, JobManager, JobRequest, Runner, UpscaleRequest
+from web.jobs import (
+    BusyError,
+    ExtendRequest,
+    Img2ImgRequest,
+    InpaintRequest,
+    JobManager,
+    JobRequest,
+    RemoveRequest,
+    Runner,
+    SharpUpscaleRequest,
+    UpscaleRequest,
+)
 from web.sources import SourceStore
 from web.users import UserStore
 
@@ -80,6 +97,21 @@ class UpscaleBody(BaseModel):
     name: str | None = None  # a gallery image...
     source_id: str | None = None  # ...or an Edit-studio draft
     parent_name: str | None = None  # gallery image a draft came from (for its prompt and seed)
+    scale: Literal[2, 4] = 2  # 2 = AI detail (diffusion), 4 = sharp upscaling model
+
+
+class ExtendBody(BaseModel):
+    sides: list[str]  # any of left, top, right, bottom
+    amount: float = DEFAULT_EXTEND_AMOUNT  # each side grows by this share of the picture's width/height
+    prompt: str = ""  # what the new area shows; empty = more of the same scene
+    source_id: str | None = None
+    source_name: str | None = None
+
+
+class RemoveBody(BaseModel):
+    mask_id: str  # uploaded mask: white = remove
+    source_id: str | None = None
+    source_name: str | None = None
 
 
 class SaveBody(BaseModel):
@@ -133,6 +165,12 @@ def make_runner(settings: Settings, galleries: GalleryProvider) -> Runner:
             result = await img2img(request.source, request.params, request.strength, settings, on_progress, on_preview)
         elif isinstance(request, InpaintRequest):
             result = await inpaint(request.source, request.mask, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, ExtendRequest):
+            result = await extend(request.source, request.layout, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, RemoveRequest):
+            result = await remove_object(request.source, request.mask, request.params, settings, on_progress, on_preview)
+        elif isinstance(request, SharpUpscaleRequest):
+            result = await sharp_upscale(request.source, request.model_name, request.params, settings, on_progress, on_preview)
         else:
             result = await generate(request, settings, on_progress=on_progress, save_copy=False, on_preview=on_preview)
         gallery = await galleries.get()
@@ -256,6 +294,35 @@ def create_app(
             raise ApiError(422, str(exc)) from exc
         return start_job(request)
 
+    @app.post("/api/extend")
+    async def start_extend(body: ExtendBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = resolve_source(gallery, body.source_id, body.source_name)
+        if source is None:
+            raise ApiError(422, "Choose the image to extend.")
+        try:
+            request = build_extend(
+                source=source, sides=set(body.sides), amount=body.amount, prompt=body.prompt,
+                available=await catalog.available(),
+            )
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
+    @app.post("/api/remove")
+    async def start_remove(body: RemoveBody) -> dict[str, str]:
+        gallery = await require_gallery()
+        source = resolve_source(gallery, body.source_id, body.source_name)
+        if source is None:
+            raise ApiError(422, "Choose the image to clean up.")
+        with image_errors():
+            mask = sources.path(body.mask_id)
+        try:
+            request = build_remove(source=source, mask=mask, available=await catalog.available())
+        except InvalidParamsError as exc:
+            raise ApiError(422, str(exc)) from exc
+        return start_job(request)
+
     @app.post("/api/generate")
     async def start_generation(body: GenerateRequest) -> dict[str, str]:
         gallery = await require_gallery()
@@ -318,7 +385,10 @@ def create_app(
             else:
                 raise ApiError(422, "Choose the image to upscale.")
         try:
-            request = build_upscale(image, path, await catalog.available())
+            if body.scale == 4:
+                request = build_sharp_upscale(path, image.params, await catalog.upscalers())
+            else:
+                request = build_upscale(image, path, await catalog.available())
         except InvalidParamsError as exc:
             raise ApiError(422, str(exc)) from exc
         return start_job(request)
@@ -340,6 +410,7 @@ def create_app(
             ],
             "default": default.key if default else None,
             "inpaint": profile_by_key(INPAINT_KEY) in available,
+            "sharp": SHARP_MODEL in await catalog.upscalers(),
             "styles": [{"key": s.key, "label": s.label, "emoji": s.emoji} for s in STYLES],
         }
 

@@ -72,8 +72,16 @@ A local website for generating and browsing images without an LLM. Type a prompt
 - **Three tabs:** **Create** (the generator and your latest result), **Edit** (the LUMOS editing studio) and
   **Gallery** (every image).
 - **Edit (LUMOS Edit):** open any image with **✏️ Open in Edit** (image viewer), or drop or paste a photo onto Edit.
-  - **AI tools:** 🖌️ **Fix** (brush the area, describe it), 🎨 **Restyle** (prompt + strength + style),
-    🔍 **Upscale ×2**. They show the live preview on the Edit canvas and are saved to the Gallery automatically.
+  - **AI tools:** 🖌️ **Fix** (brush the area, describe it), 🧽 **Remove** (brush over an object; it's filled in
+    to match its surroundings), ↔️ **Extend** (pick sides and how much; a dashed frame previews the new canvas; an
+    optional prompt says what the new area shows), 🎨 **Restyle** (prompt + strength + style), 🔍 **Upscale**
+    (**×2 Detail**: AI-added detail, images up to 768 px; **×4 Sharp**: RealESRGAN x4plus, faithful, up to
+    1024 px). They show the live preview on the Edit canvas and are saved to the Gallery automatically.
+  - **Full resolution:** the AI works at a GPU-safe size, but Fix, Remove and Extend paste their result back onto
+    the full-size original, so only the painted or new area changes and the picture never shrinks (Extend's
+    result is capped at 2048 px).
+  - **×4 Sharp needs** `RealESRGAN_x4plus.safetensors` in ComfyUI's `models/upscale_models`
+    (from huggingface.co/Comfy-Org/Real-ESRGAN_repackaged).
   - **Instant tools (no GPU):** ✂️ **Crop** (Free · 1:1 · 4:5 · 3:2 · 16:9 · 9:16; drag to draw or move), rotate,
     flip; ☀️ **Adjust** (brightness, contrast, saturation, warmth); 🎞️ **Filters** (Vivid, Matte, Noir, Warm film,
     Cool, Fade).
@@ -160,6 +168,9 @@ How it behaves:
 | **🔍 Upscale** under an image | a 2× larger version, sent as a file so Telegram doesn't compress it |
 | a **photo with a caption** ("make it winter") | that photo repainted following the caption; 🔁 Vary and 🖼️ ×4 keep using the same photo |
 | a photo you **drew on with the pink pen**, captioned `/fix a red beanie hat` | only the scribbled area changes (inpainting), after you confirm a preview |
+| a photo you **drew on with the pink pen**, captioned `/remove` | the scribbled thing disappears, after you confirm a preview |
+| a photo captioned `/extend` (optionally `/extend a sandy beach`) | **↔️ Wider · ↕️ Taller · ⛶ All sides** buttons, then the picture grows that way |
+| **↔️ Extend** / **🔎 Sharp ×4** under an image | extend that image, or a crisp 4× larger file (images up to 1024 px) |
 
 **`/fix` in Telegram:**
 1. In Telegram's photo editor, draw over the part to change with a **bright pink** pen. Scribble over it, or

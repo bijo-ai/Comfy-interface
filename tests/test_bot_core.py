@@ -69,6 +69,9 @@ class FakeCatalog:
     def __init__(self, ckpts=(DREAM, SD15, SDXL)) -> None:
         self.ckpts = list(ckpts)
 
+    async def upscalers(self):
+        return ["RealESRGAN_x4plus.safetensors"]
+
     async def available(self):
         return available_profiles(self.ckpts)
 
@@ -89,6 +92,9 @@ def make_bot(tmp_path: Path, runner, allowed: int | None = USER, ckpts=(DREAM, S
     return bot
 
 
+SINGLE_RESULT = ("InpaintRequest", "ExtendRequest", "RemoveRequest", "SharpUpscaleRequest")
+
+
 def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
     """Runner that records requests and returns one gallery image per requested batch slot."""
 
@@ -96,7 +102,7 @@ def done_runner(seen: list, make_png=None, tmp_path: Path | None = None):
         seen.append(request)
         for step in range(1, 21):
             on_progress(step, 20)
-        if isinstance(request, UpscaleRequest) or type(request).__name__ == "InpaintRequest":
+        if isinstance(request, UpscaleRequest) or type(request).__name__ in SINGLE_RESULT:
             count = 1
         else:
             count = request.params.batch if isinstance(request, Img2ImgRequest) else request.batch
@@ -177,7 +183,7 @@ def test_plain_text_uses_default_model_and_sends_photo_with_buttons(tmp_path, mo
     _, path, caption, buttons = chat.calls[2]
     assert path == (tmp_path / "img1_0.png").resolve()
     assert caption == "a beach\n\nseed 1234 · 512×512 · DreamShaper 8 · 5.5s"
-    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up"]
+    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp"]
     assert chat.calls[3] == ("delete", status_id)
 
 
@@ -201,7 +207,8 @@ def test_model_and_style_choice_persist(tmp_path, make_png) -> None:
     assert (params.model, params.width, params.height) == (SDXL, 832, 1216)
     assert params.prompt.startswith("a cat, ") and "anime" in params.prompt
     photo_buttons = chat.last("send_photo")[3]
-    assert [data.split(":")[0] for data in button_data(photo_buttons)] == ["vary"]  # SDXL: no ×4, no upscale
+    # SDXL portrait: no ×4 variations or ×2 upscale (too heavy), and 1216 px is too tall for sharp ×4
+    assert [data.split(":")[0] for data in button_data(photo_buttons)] == ["vary", "ext"]
 
 
 def test_choosing_missing_model_is_refused(tmp_path) -> None:
@@ -473,7 +480,7 @@ def test_photo_with_caption_runs_img2img(tmp_path, make_png) -> None:
     assert (request.params.width, request.params.height) == (768, 576)
     assert request.source.parent == tmp_path / "sources"
     buttons = chat.last("send_photo")[3]
-    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up"]
+    assert [data.split(":")[0] for data in button_data(buttons)] == ["vary", "x4", "up", "ext", "sharp"]
 
 
 def test_vary_and_x4_of_img2img_keep_the_start_image(tmp_path, make_png) -> None:
@@ -483,7 +490,7 @@ def test_vary_and_x4_of_img2img_keep_the_start_image(tmp_path, make_png) -> None
 
     async def scenario():
         await bot.handle_photo(USER, photo_bytes(), "as an oil painting", chat)
-        vary, x4, _ = button_data(chat.last("send_photo")[3])
+        vary, x4, *_ = button_data(chat.last("send_photo")[3])
         await bot.handle_button(USER, vary, chat)
         await bot.handle_button(USER, x4, chat)
 
@@ -566,7 +573,7 @@ def test_fix_with_scribble_previews_then_inpaints(tmp_path, make_png) -> None:
     with Image.open(request.mask) as mask:
         assert mask.convert("L").getpixel((400, 62)) == 255 and mask.convert("L").getpixel((400, 500)) == 0
     result_buttons = chat.last("send_photo")[3]
-    assert [data.split(":")[0] for data in button_data(result_buttons)] == ["vary", "up"]  # no ×4 for fixes
+    assert [data.split(":")[0] for data in button_data(result_buttons)] == ["vary", "up", "ext", "sharp"]  # no ×4 for fixes
 
 
 def test_fix_without_scribble_offers_area_buttons(tmp_path, make_png) -> None:
@@ -615,3 +622,78 @@ def test_fix_needs_prompt_and_model(tmp_path, make_png) -> None:
     chat = FakeChat()
     asyncio.run(fix_bot(tmp_path, seen, make_png, ckpts=(DREAM,)).handle_photo(USER, photo_with_scribble(), "/fix a hat", chat))
     assert seen == [] and "isn't installed" in chat.texts()[0]
+
+
+# --- /remove, /extend, sharp ×4 ---------------------------------------------------------------------------
+
+from web.jobs import ExtendRequest, RemoveRequest, SharpUpscaleRequest  # noqa: E402
+
+
+def test_remove_with_scribble_previews_then_removes(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_with_scribble(), "/remove", chat)
+        assert seen == []
+        _, preview, caption, buttons = chat.last("send_photo")
+        assert "remove" in caption and preview.exists()
+        assert [data.split(":")[0] for data in button_data(buttons)] == ["rmok", "fixno"]
+        await bot.handle_button(USER, button_data(buttons)[0], chat)
+        _, _, result_caption, result_buttons = chat.last("send_photo")
+        assert result_caption.startswith("🧽 Removed · 512×512")  # the size of the image that came back
+        await bot.handle_button(USER, button_data(result_buttons)[0], chat)  # 🔁 Vary repeats the removal
+
+    asyncio.run(scenario())
+    first, varied = seen
+    assert isinstance(first, RemoveRequest) and "empty background" in first.params.prompt
+    assert isinstance(varied, RemoveRequest) and varied.mask == first.mask and varied.params.seed is None
+
+
+def test_remove_without_scribble_or_model(tmp_path, make_png) -> None:
+    seen: list = []
+    chat = FakeChat()
+    asyncio.run(fix_bot(tmp_path, seen, make_png).handle_photo(USER, photo_with_scribble(False), "/remove", chat))
+    assert seen == [] and "pink pen" in chat.texts()[-1]
+    chat = FakeChat()
+    asyncio.run(fix_bot(tmp_path, seen, make_png, ckpts=(DREAM,)).handle_photo(USER, photo_with_scribble(), "/remove", chat))
+    assert seen == [] and "/remove needs" in chat.texts()[-1]
+
+
+def test_extend_photo_asks_direction(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = fix_bot(tmp_path, seen, make_png), FakeChat()
+
+    async def scenario():
+        await bot.handle_photo(USER, photo_bytes(), "/extend a sandy beach", chat)
+        _, text, _, buttons = next(c for c in reversed(chat.calls) if c[0] == "send_text")
+        assert "Which way" in text
+        assert [data.split(":")[0] for data in button_data(buttons)] == ["exd", "exd", "exd", "fixno"]
+        await bot.handle_button(USER, button_data(buttons)[0], chat)  # ↔️ Wider
+        await bot.handle_button(USER, button_data(buttons)[0], chat)  # the same button again: already used
+
+    asyncio.run(scenario())
+    (request,) = seen
+    assert isinstance(request, ExtendRequest) and request.params.prompt == "a sandy beach"
+    assert request.layout.canvas[0] > request.layout.box[2] and request.layout.canvas[1] == request.layout.box[3]
+    assert chat.texts()[-1] == EXPIRED
+
+
+def test_result_buttons_extend_and_sharp(tmp_path, make_png) -> None:
+    seen: list = []
+    bot, chat = make_bot(tmp_path, done_runner(seen, make_png, tmp_path), ckpts=(DREAM, INPAINT)), FakeChat()
+
+    async def scenario():
+        await bot.handle_text(USER, "a beach", chat)
+        buttons = dict((data.split(":")[0], data) for data in button_data(chat.last("send_photo")[3]))
+        await bot.handle_button(USER, buttons["sharp"], chat)
+        assert chat.last("send_document")[2].startswith("🔎 Upscaled ×4 · 2048×2048")
+        await bot.handle_button(USER, buttons["ext"], chat)
+        _, _, _, directions = next(c for c in reversed(chat.calls) if c[0] == "send_text")
+        await bot.handle_button(USER, button_data(directions)[2], chat)  # ⛶ All sides
+
+    asyncio.run(scenario())
+    _, sharp, extended = seen
+    assert isinstance(sharp, SharpUpscaleRequest) and (sharp.params.width, sharp.params.height) == (512, 512)
+    assert isinstance(extended, ExtendRequest) and extended.source == (tmp_path / "img1_0.png").resolve()
+    assert extended.layout.box[:2] != (0, 0)

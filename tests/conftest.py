@@ -55,3 +55,4 @@ def no_comfyui_checkpoint_lookup(monkeypatch):
         raise ComfyUIUnavailableError("offline in tests")
 
     monkeypatch.setattr(ModelCatalog, "_fetch_checkpoints", offline)
+    monkeypatch.setattr(ModelCatalog, "_fetch_upscale_models", offline)
